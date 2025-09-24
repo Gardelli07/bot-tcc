@@ -430,8 +430,6 @@ function formatAddressForSummary(dados) {
 
   return '(não informado)';
 }
-
-// atualizada: monta e envia o resumo do pedido (com preços e endereço formatado)
 async function sendOrderSummary(to, estado) {
   const d = estado.dados || {};
   const qty = Number(d.quantidade) || 1;
@@ -452,9 +450,8 @@ async function sendOrderSummary(to, estado) {
     '2️⃣ Editar Nome',
     '3️⃣ Editar Item/Quantidade',
     '4️⃣ Editar Endereço',
-    '5️⃣ Editar Entrega (Retirada/Delivery)',
-    '6️⃣ Editar Pagamento',
-    '0️⃣ Cancelar / Voltar ao Menu',
+    '5️⃣ Editar Pagamento',
+    '0️⃣ Cancelar / Voltar',
     '',
     'Responda com o número da opção desejada.'
   ];
@@ -462,6 +459,7 @@ async function sendOrderSummary(to, estado) {
   await client.sendMessage(to, text);
   estado.etapa = 'pedido_confirm';
 }
+
 
 // Gera texto simplificado do pedido para envio ao grupo (sem opções de edição)
 function buildOrderReportForGroup(dados, from) {
@@ -875,29 +873,25 @@ if (estado.etapa === 'pedido_cep_confirm') {
         return;
       }
 
-      // Recebe complemento (após número)
-      if (estado.etapa === 'pedido_complemento') {
-        const complemento = (msg.body || '').trim();
-        estado.dados.complemento = complemento && complemento.toLowerCase() !== 'sem' ? complemento : '';
-        // ajusta campo endereco final juntando base + número + complemento
-        const base = estado.dados.endereco || (estado.dados._lastCepInfo ? formatAddressFromCep(estado.dados._lastCepInfo) : '');
-        const parts = [base];
-        if (estado.dados.numero) parts.push(`Nº ${estado.dados.numero}`);
-        if (estado.dados.complemento) parts.push(`Compl.: ${estado.dados.complemento}`);
-        estado.dados.endereco = parts.filter(Boolean).join(', ');
-        // continua fluxo de entrega como antes
-        await client.sendMessage(from, 'Opção de entrega (Retirada/Delivery):');
-        estado.etapa = 'pedido_entrega';
-        return;
-      }
+        if (estado.etapa === 'pedido_complemento') {
+          const complemento = (msg.body || '').trim();
+          estado.dados.complemento = complemento && complemento.toLowerCase() !== 'sem' ? complemento : '';
+          // ajusta campo endereco final juntando base + número + complemento
+          const base = estado.dados.endereco || (estado.dados._lastCepInfo ? formatAddressFromCep(estado.dados._lastCepInfo) : '');
+          const parts = [base];
+          if (estado.dados.numero) parts.push(`Nº ${estado.dados.numero}`);
+          if (estado.dados.complemento) parts.push(`Compl.: ${estado.dados.complemento}`);
+          estado.dados.endereco = parts.filter(Boolean).join(', ');
+
+          // sem opção de retirada — definimos por padrão Delivery e seguimos para pagamento
+          estado.dados.entrega = 'Fretado';
+          await client.sendMessage(from, 'Método de pagamento (Pix/Dinheiro/Boleto/Depósito Bancário/Cheque):');
+          estado.etapa = 'pedido_pagamento';
+          return;
+        }
+
 
       // ... restante do fluxo (pedido_entrega e pedido_pagamento continuam iguais)
-      if (estado.etapa === 'pedido_entrega') {
-        estado.dados.entrega = msg.body || '';
-        await msg.reply('Método de pagamento (Pix/Dinheiro/Boleto/Depósito Bancário/Cheque):');
-        estado.etapa = 'pedido_pagamento';
-        return;
-      }
       if (estado.etapa === 'pedido_pagamento') {
         estado.dados.pagamento = msg.body || '';
         // envia resumo e pede confirmação/edição
@@ -908,7 +902,7 @@ if (estado.etapa === 'pedido_cep_confirm') {
       // etapa: pedido_confirm -> interpreta escolha do usuário
       if (estado.etapa === 'pedido_confirm') {
       if (text === '1' || /^confirm/i.test(text) || /^sim/i.test(text)) {
-  await client.sendMessage(from, `✅ Orçamento confirmado e registrado!\n\nObrigado! Em breve entraremos em contato.\n\nSe quiser voltar ao menu inicial, basta enviar qualquer mensagem.`);
+  await client.sendMessage(from, `✅ Orçamento confirmado e registrado!\n\nObrigado! Em breve entraremos em contato.\n\nSe quiser voltar ao menu inicial, só digitar "menu".`);
 
   // enviar resumo do orçamento para o grupo (fazemos em background, sem enviar nada mais ao usuário)
   (async () => {
@@ -930,7 +924,7 @@ if (estado.etapa === 'pedido_cep_confirm') {
 
 
 
-        // editar campos: 2..6
+        // editar campos: 2..5 (5 agora é editar pagamento)
         if (text === '2') { await client.sendMessage(from, '✏️ OK — envie o *novo nome* (nome do cliente/loja):'); estado.etapa = 'pedido_edit_nome'; return; }
         if (text === '3') {
           await client.sendMessage(from, '✏️ OK — envie o *novo item e quantidade* (ex: "2x MILHO MOÍDO 24 KG" ou "x2 MILHO MOIDO 24KG"):');
@@ -945,8 +939,7 @@ if (estado.etapa === 'pedido_cep_confirm') {
           estado.dados._lastCepInfo_edit = null;
           return;
         }
-        if (text === '5') { await client.sendMessage(from, '✏️ OK — envie a *nova opção de entrega* (Retirada/Delivery):'); estado.etapa = 'pedido_edit_entrega'; return; }
-        if (text === '6') { await client.sendMessage(from, '✏️ OK — envie o *novo método de pagamento* (Pix/Dinheiro/Boleto/Depósito Bancário/Cheque):'); estado.etapa = 'pedido_edit_pagamento'; return; }
+        if (text === '5') { await client.sendMessage(from, '✏️ OK — envie o *novo método de pagamento* (Pix/Dinheiro/Boleto/Depósito Bancário/Cheque):'); estado.etapa = 'pedido_edit_pagamento'; return; }
 
         // cancelar
         if (text === '0' || text === 'cancel' || text === 'cancelar') {
@@ -954,8 +947,7 @@ if (estado.etapa === 'pedido_cep_confirm') {
           await client.sendMessage(from, 'Orçamento cancelado. Voltando ao menu inicial...');
           await sendPrimaryMenu(from);
           return;
-        }
-
+}
         // nao entendeu
         await client.sendMessage(from, 'Não entendi sua opção. Responda com número: 1 confirmar, 2–6 editar, 0 cancelar.');
         return;
@@ -1102,14 +1094,6 @@ if (estado.etapa === 'pedido_complemento_edit') {
   return;
 }
 
-
-
-      if (estado.etapa === 'pedido_edit_entrega') {
-        estado.dados.entrega = msg.body || '';
-        await client.sendMessage(from, 'Opção de entrega atualizada.');
-        await sendOrderSummary(from, estado);
-        return;
-      }
       if (estado.etapa === 'pedido_edit_pagamento') {
         estado.dados.pagamento = msg.body || '';
         await client.sendMessage(from, 'Método de pagamento atualizado.');
@@ -1120,7 +1104,7 @@ if (estado.etapa === 'pedido_complemento_edit') {
       // DÚVIDAS
       if (estado.etapa === 'duvidas') {
         if (text === '1') {
-          await msg.reply('📌 FAQ:\n- Horário: 08h–18h\n- Pagamento: Pix, Dinheiro, Boleto, Depósito Bancário, Cheque\n- Entrega: Retirada ou Delivery\n\nSe quiser voltar ao menu inicial, só digitar "menu".');
+          await msg.reply('📌 FAQ:\n- Horário: 08h–18h\n-Pagamento: Pix, Dinheiro, Boleto, Depósito Bancário, Cheque\n- Entrega: Retirada ou Delivery\n\nSe quiser voltar ao menu inicial, só digitar "menu".');
           estado.etapa = 'fim';
           return;
         } else if (text === '2') {
@@ -1137,37 +1121,42 @@ if (estado.etapa === 'pedido_complemento_edit') {
         }
       }
       if (estado.etapa === 'duvida_escrita') {
-  estado.dados.duvida = msg.body || '';
+        // grava localmente
+        estado.dados.duvida = msg.body || '';
 
-  // envia a dúvida para o grupo de Duvidas (ou fallback para STAFF_CHAT_ID)
-  (async () => {
-    try {
-      const targetGroup = DUVIDAS_GROUP_ID || STAFF_CHAT_ID;
-      if (targetGroup) {
-        const snippet = String(estado.dados.duvida || '').trim();
-        const groupMsg = [
-          '📩 *Nova Dúvida Recebida*',
-          `De: ${from}`,
-          `Mensagem:`,
-          snippet || '(sem texto)',
-        ].join('\n');
-        await client.sendMessage(targetGroup, groupMsg);
-      } else {
-        smallLog('Nenhum DUVIDAS_GROUP_ID configurado — dúvida não enviada a grupo.');
+        // confirma para o usuário (resposta curta) — comportamento parecido com confirmação de orçamento
+        try {
+          await client.sendMessage(from, '📩 Sua dúvida foi registrada. Em breve retornaremos por aqui.\n\nSe quiser voltar ao menu inicial, só digitar "menu".');
+        } catch (e) {
+          smallLog('Erro ao enviar confirmação de dúvida ao usuário:', e && e.message ? e.message : e);
+        }
+
+        // envia a dúvida para o grupo de Duvidas (ou fallback para STAFF_CHAT_ID) em background
+        (async () => {
+          try {
+            const targetGroup = DUVIDAS_GROUP_ID || STAFF_CHAT_ID;
+            if (targetGroup) {
+              const snippet = String(estado.dados.duvida || '').trim();
+              const groupMsg = [
+                '📩 *Nova Dúvida Recebida*',
+                `De: ${from}`,
+                `Mensagem:`,
+                snippet || '(sem texto)',
+              ].join('\n');
+              await client.sendMessage(targetGroup, groupMsg);
+              smallLog('Dúvida enviada para grupo:', targetGroup);
+            } else {
+              smallLog('Nenhum DUVIDAS_GROUP_ID configurado — dúvida não enviada a grupo.');
+            }
+          } catch (e) {
+            smallLog('Erro ao enviar dúvida para grupo:', e && e.message ? e.message : e);
+          }
+        })();
+
+        // encerra atendimento automático para este chat — aguarda próxima mensagem do usuário para reiniciar
+        userState[from] = { etapa: 'done', dados: {} };
+        return;
       }
-    } catch (e) {
-      smallLog('Erro ao enviar dúvida para grupo:', e && e.message ? e.message : e);
-    }
-  })();
-
-  // confirma para o usuário (resposta curta)
-  await msg.reply('📩 Sua dúvida foi registrada. Em breve retornaremos por aqui.\n\nSe quiser voltar ao menu inicial, só digitar "menu".');
-
-  // limpa estado e volta ao menu
-  userState[from] = { etapa: 'inicio', dados: {} };
-  await sendPrimaryMenu(from);
-  return;
-}
       // FIM
       if (estado.etapa === 'fim') {
         if (text === '0' || text === 'menu' || text === 'voltar') {
