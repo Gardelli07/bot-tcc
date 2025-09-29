@@ -264,31 +264,6 @@ client.sendMessage = async function(...args) {
 };
 // --- fim TRACKER FINAL ---
 
-// --- DEBUG: registrar mensagens criadas (inclui mensagens digitadas na sessão) ---
-client.on('message_create', (m) => {
-  try {
-    const mid = m && m.id && m.id._serialized ? m.id._serialized : null;
-    const fromMe = !!m.fromMe;
-    const from = m.from || null;
-    const to = m.to || null;
-    const body = (m.body || '').replace(/\r?\n/g, ' ').slice(0, 300);
-    const isProgrammatic = mid ? programmaticSent.has(mid) : false;
-
-    smallLog('=== MSG_CREATE ===', JSON.stringify({
-      id: mid,
-      from,
-      to,
-      fromMe,
-      isProgrammatic,
-      bodyPreview: body,
-      ts: new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })
-    }, null, 2));
-  } catch (e) {
-    smallLog('Erro no listener message_create debug:', e && e.message ? e.message : e);
-  }
-});
-// --- fim DEBUG ---
-
   client.on('qr', qr => qrcode.generate(qr, { small: true }));
     let SELF_ID = null;
 
@@ -307,6 +282,31 @@ client.on('message_create', (m) => {
 
   // memória simples de estado por usuário
   let userState = {}; // { '5515...@c.us': { etapa: 'menu_principal'|'handoff'|..., dados:{...} } }
+
+    // ------------------ LOG DE MENSAGENS (msgcli / msgbot / msgadm) ------------------
+  // Mantém logs na memória (pode persistir em arquivo/DB se quiser)
+  const messageLogs = {}; // { chatId: [ { type:'msgcli'|'msgbot'|'msgadm', body, from, id, ts } ] }
+
+  function saveMsgLog(chatId, type, payload) {
+    try {
+      if (!chatId) return;
+      if (!messageLogs[chatId]) messageLogs[chatId] = [];
+      messageLogs[chatId].push({
+        type: type,
+        body: (payload && payload.body) ? payload.body : (typeof payload === 'string' ? payload : ''),
+        from: (payload && payload.from) ? payload.from : (payload && payload.author) ? payload.author : null,
+        id: (payload && payload.id) ? payload.id : null,
+        ts: new Date().toISOString()
+      });
+      // opcional: truncar tamanho (ex: manter últimas 200 mensagens)
+      const MAX = 500;
+      if (messageLogs[chatId].length > MAX) messageLogs[chatId].splice(0, messageLogs[chatId].length - MAX);
+    } catch (e) {
+      smallLog('saveMsgLog erro:', e && e.message ? e.message : e);
+    }
+  }
+  // ------------------ fim saveMsgLog ------------------
+
 
 function dentroHorario() {
   try {
@@ -488,32 +488,31 @@ function buildOrderReportForGroup(dados, from) {
 let chat = null;
 try { chat = await msg.getChat(); } catch (e) { /* ignore */ }
 
-// DEBUG: log de metadados da mensagem — cole ESTE BLOCO logo abaixo do "let chat = null; try { chat = await msg.getChat(); } catch(...) {}"
-try {
-  const meta = {
-    id: msg.id && msg.id._serialized ? msg.id._serialized : null,
-    from: msg.from || null,
-    to: msg.to || null,
-    chatId: chat && chat.id && chat.id._serialized ? chat.id._serialized : (msg.to || msg.from),
-    fromMe: !!msg.fromMe,
-    isGroup: !!(chat && chat.isGroup),
-    isStatus: !!msg.isStatus,
-    hasMedia: !!msg.hasMedia,
-    hasQuotedMsg: !!msg.hasQuotedMsg,
-    isEphemeral: !!msg.isEphemeral,
-    type: msg.type || null,
-    bodyPreview: (msg.body || '').replace(/\r?\n/g, ' ').slice(0, 200),
-    timestampLocal: msg.timestamp ? new Date(msg.timestamp * 1000).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' }) : (new Date()).toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' })
-  };
-
-  // exibe de forma legível (JSON indentado)
-  smallLog('=== MSG META ===\n' + JSON.stringify(meta, null, 2));
-} catch (e) {
-  smallLog('Erro ao montar meta da mensagem:', e && e.message ? e.message : e);
-}
 
 // chatAtual = id do chat onde o comando foi escrito (pode ser grupo ou conversa direta)
 const chatAtual = (chat && chat.id && chat.id._serialized) ? chat.id._serialized : (msg.to || msg.from);
+
+// --- GRAVAÇÃO AUTOMÁTICA: classifica a mensagem e salva no messageLogs ---
+try {
+  const chatId = (chat && chat.id && chat.id._serialized) ? chat.id._serialized : (msg.to || msg.from);
+  const mid = (msg.id && msg.id._serialized) ? msg.id._serialized : null;
+  const isProg = mid ? programmaticSent.has(mid) : false;
+  if (msg.fromMe) {
+    // mensagem originada por esta sessão (pode ser programática ou digitada manualmente)
+    if (isProg) {
+      saveMsgLog(chatId, 'msgbot', { body: msg.body || '', from: msg.from || null, id: mid });
+    } else {
+      saveMsgLog(chatId, 'msgadm', { body: msg.body || '', from: msg.from || null, id: mid });
+    }
+  } else {
+    // mensagem do cliente
+    saveMsgLog(chatId, 'msgcli', { body: msg.body || (msg.caption || '') || '<mídia sem texto>', from: msg.from || null, id: mid });
+  }
+} catch (e) {
+  smallLog('Erro ao salvar log automático da mensagem:', e && e.message ? e.message : e);
+}
+// --- fim gravação automática ---
+
 
 // cmd raw (preserva possíveis números)
 const cmd = (textRaw || '').trim();
@@ -573,92 +572,103 @@ if (typedBySelf && targetChat) {
   }
 }
 
-// substitua o bloco antigo de "comandos para atendente" por este (cole onde você já processava comandos)
+// ----------------- BLOCO REPARADO: processamento de comandos com debug e regra simplificada -----------------
 try {
-  // helper: tenta resolver target a partir do comando ou de mensagem citada
+  // normaliza allowed staff
+  const ALLOWED_STAFF = (process.env.ALLOWED_STAFF || '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean)
+    .map(s => (/@(c|g)\.us$/.test(s) ? s : (s.replace(/\D/g,'' ) + '@c.us')));
+
+  // quem realmente "assinou" a mensagem (quando aplicável)
+  const senderId = msg.fromMe ? (SELF_ID || msg.from) : (msg.author || msg.from);
+
+  // debug rápido (remova depois)
+  smallLog('[CMD DEBUG] senderId:', senderId, 'msg.from:', msg.from, 'msg.author:', msg.author, 'chatAtual:', chatAtual);
+
   async function resolveTargetFromCmd(cmd, msg) {
-    // 1) se staff respondeu/quotou a mensagem do usuário -> pega quoted.from
     try {
       if (msg.hasQuotedMsg) {
         const quoted = await msg.getQuotedMessage().catch(()=>null);
         if (quoted && quoted.from) return quoted.from;
+        if (quoted && quoted.author) return quoted.author;
       }
-    } catch (e) { /* ignore */ }
-
-    // 2) procura um número no comando (ex: !handoff 5515991386482)
+    } catch(e) {}
     const m = (cmd || '').match(/(\d{10,15})(?:@c\.us|@g\.us)?/);
     if (m && m[1]) return `${m[1]}@c.us`;
 
-    // não achou
+    // se for mensagem digitada na sessão, o chat atual é o alvo (chatAtual variável definida mais acima)
+    if (chatAtual && chatAtual !== SELF_ID) return chatAtual;
+
+    // fallback null
     return null;
   }
 
-  // detectar se o remetente é staff: msg.from === STAFF_CHAT_ID ou está em ALLOWED_STAFF env list
-  const ALLOWED_STAFF = (process.env.ALLOWED_STAFF || '').split(',').map(s => s.trim()).filter(Boolean); // ex: "5515991111111@c.us,5515992222222@c.us"
-  const isStaffSender = (STAFF_CHAT_ID && msg.from === STAFF_CHAT_ID) || ALLOWED_STAFF.includes(msg.from);
-  
+  // identificar staff (inclui operador local SELF_ID)
+  const isStaffSender = (
+    (STAFF_CHAT_ID && (msg.from === STAFF_CHAT_ID || msg.to === STAFF_CHAT_ID || senderId === STAFF_CHAT_ID)) ||
+    ALLOWED_STAFF.includes(senderId) ||
+    (senderId === SELF_ID)
+  );
 
-  // se for comando (enviado pelo próprio cliente) OU vindo do staff configurado
-if ((typedBySelf || isStaffSender) && (textRaw.startsWith('!') || textRaw.startsWith('/'))) {
-    const cmd = textRaw.split(/\s+/)[0].toLowerCase();
+  const msgIdLocal = (msg.id && msg.id._serialized) ? msg.id._serialized : null;
+  const isProgLocal = msgIdLocal ? programmaticSent.has(msgIdLocal) : false;
+  const typedBySelfLocal = !!msg.fromMe && !isProgLocal;
 
-    // HANDOFF: assumir atendimento manual
-    if (/^(!handoff|\/handoff)$/i.test(cmd)) {
+  smallLog('[CMD DEBUG] typedBySelfLocal:', typedBySelfLocal, 'isProgLocal:', isProgLocal, 'isStaffSender:', isStaffSender);
+
+  // se começar com ! ou / e for de staff ou digitado na sessão, tratar comandos
+  if ((typedBySelfLocal || isStaffSender) && (textRaw.startsWith('!') || textRaw.startsWith('/'))) {
+    const shortCmd = textRaw.split(/\s+/)[0].toLowerCase();
+
+    // HANDOFF
+    if (/^(!handoff|\/handoff)$/i.test(shortCmd)) {
       const target = await resolveTargetFromCmd(textRaw, msg);
       if (!target) {
-        // se quem enviou foi o próprio (fromMe) e não passou alvo, assumimos o chat atual (msg.to/msg.from)
-        if (typedBySelf) {
-          const chat = await msg.getChat().catch(()=>null);
-          const guess = chat && chat.id && chat.id._serialized ? chat.id._serialized : (msg.to || msg.from);
-          if (guess) {
-            userState[guess] = userState[guess] || { etapa: 'handoff', dados: {} };
-            userState[guess].etapa = 'handoff';
-            userState[guess].dados._handoffBy = msg.from || 'sessao';
-            await client.sendMessage(msg.from, `✋ Handoff ativado para ${guess}.`);
-            return;
-          }
-        }
-
-        // pede target
         await client.sendMessage(msg.from, '⚠️ Indique o número alvo: !handoff 551599XXXXXXX ou responda/quote a mensagem do usuário e envie !handoff.');
         return;
       }
 
-      // ativa handoff para target
       userState[target] = userState[target] || { etapa: 'handoff', dados: {} };
       userState[target].etapa = 'handoff';
-      userState[target].dados._handoffBy = msg.from || 'staff';
-      smallLog(`Handoff ativado para ${target} por ${msg.from}`);
+      userState[target].dados._handoffBy = senderId || msg.from || 'staff';
+      smallLog(`Handoff ativado para ${target} por ${senderId || msg.from}`);
 
-      // confirma para o staff
       await client.sendMessage(msg.from, `✔️ Handoff ativado para ${target}. O bot vai parar de automatizar esse chat.`);
-      // opcional: notificar equipe
       if (STAFF_CHAT_ID && STAFF_CHAT_ID !== msg.from) {
-        client.sendMessage(STAFF_CHAT_ID, `✋ Handoff: ${msg.from} assumiu ${target}`);
+        client.sendMessage(STAFF_CHAT_ID, `✋ Handoff: ${senderId || msg.from} assumiu ${target}`).catch(()=>{});
       }
       return;
     }
 
-    // BOT: devolver ao bot (reativar automação)
-    if (/^(!bot|\/bot)$/i.test(cmd)) {
-      const target = await resolveTargetFromCmd(textRaw, msg) || (typedBySelf ? ((await msg.getChat().catch(()=>null))?.id?._serialized || msg.to || msg.from) : null);
+    // BOT: reativar
+    if (/^(!bot|\/bot)$/i.test(shortCmd)) {
+      const target = await resolveTargetFromCmd(textRaw, msg) || (typedBySelfLocal ? chatAtual : null);
       if (!target) {
         await client.sendMessage(msg.from, '⚠️ Indique o número alvo: !bot 551599XXXXXXX ou responda/quote a mensagem do usuário e envie !bot.');
         return;
       }
-
       userState[target] = { etapa: 'inicio', dados: {} };
-      smallLog(`Handoff desativado para ${target} por ${msg.from}`);
+      smallLog(`Handoff desativado para ${target} por ${senderId || msg.from}`);
       await client.sendMessage(msg.from, `🤖 Automação reativada para ${target}.`);
       try { await client.sendMessage(target, '🤖 O atendimento automático foi retomado. Qualquer dúvida, pode perguntar!'); } catch(e){ /* ignore */ }
       return;
     }
 
-    // aqui você pode adicionar outros comandos staff (ex: !status, !list-handoffs, etc.)
+    // list-handoffs
+    if (/^(!list-handoffs|\/list-handoffs)$/i.test(shortCmd)) {
+      const keys = Object.keys(userState).filter(k => userState[k] && userState[k].etapa === 'handoff');
+      await client.sendMessage(msg.from, `Handoffs ativos: ${keys.length ? keys.join('\n') : '(nenhum)'}`);
+      return;
+    }
   }
 } catch (e) {
-  smallLog('Erro ao processar comandos de atendente:', e && e.message ? e.message : e);
+  smallLog('Erro no bloco de comandos simplificado:', e && e.message ? e.message : e);
 }
+// ----------------- fim bloco commands -----------------
+
+
 
       // --- se for mensagem de cliente
       // garante estado
@@ -680,10 +690,35 @@ if ((typedBySelf || isStaffSender) && (textRaw.startsWith('!') || textRaw.starts
 
       // Handoff ativo: quando um atendente assumir (etapa = 'handoff'), o bot ignora automações
 if (estado.etapa === 'handoff') {
-  // Não enviar mensagens automáticas para esse usuário — permite que o atendente use a sessão do bot.
   smallLog('Usuário', from, 'está em atendimento humano — ignorando automações do bot.');
+
+  // 1) garantir que a mensagem do cliente já foi registrada (msgcli)
+  try {
+    const mid = (msg.id && msg.id._serialized) ? msg.id._serialized : null;
+    saveMsgLog(from, 'msgcli', { body: msg.body || (msg.caption || '') || '<mídia sem texto>', from: msg.from || null, id: mid });
+  } catch (e) { /* ignore */ }
+
+  // 2) encaminhar/avisar equipe (se STAFF_CHAT_ID estiver configurado)
+  if (STAFF_CHAT_ID) {
+    try {
+      if (msg.id && msg.id._serialized) {
+        // tenta encaminhar fielmente (inclui mídia)
+        await client.forwardMessages(STAFF_CHAT_ID, [msg.id._serialized], from);
+      } else {
+        // fallback textual
+        await client.sendMessage(STAFF_CHAT_ID, `✋ Mensagem de ${from}:\n${msg.body || '<mídia/sem texto>'}`);
+      }
+    } catch (e) {
+      // fallback / aviso de erro
+      try { await client.sendMessage(STAFF_CHAT_ID, `✋ (falha no forward) Mensagem de ${from}:\n${msg.body || '<mídia/sem texto>'}`); } catch(_) {}
+      smallLog('Erro ao encaminhar mensagem para staff:', e && e.message ? e.message : e);
+    }
+  }
+
+  // não processar automação enquanto handoff estiver ativo
   return;
 }
+
 
       // estado: inicio -> enviar menu primario
       if (estado.etapa === 'inicio') {
