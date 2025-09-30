@@ -14,22 +14,96 @@ function tryLoadCatalog() {
     path.join(__dirname, 'catalog_items.json'),
     path.join(process.cwd(), 'catalog_items.json'),
     path.join(__dirname, 'catalog', 'catalog_items.json'),
-    path.join(process.cwd(), 'catalog', 'catalog_items.json')
+    path.join(process.cwd(), 'catalog', 'catalog_items.json'),
+    path.join('/mnt/data', 'catalog_items.json')
   ];
+  let rawObj = null;
+  let loadedFrom = null;
+
   for (const p of candidates) {
     try {
       if (fs.existsSync(p)) {
         const raw = fs.readFileSync(p, 'utf8');
-        const obj = JSON.parse(raw);
-        smallLog('catalog_items.json carregado de', p, 'itens:', Object.keys(obj).length);
-        return obj;
+        rawObj = JSON.parse(raw);
+        loadedFrom = p;
+        break;
       }
     } catch (e) {
       smallLog('Erro lendo catalog_items.json em', p, e && e.message ? e.message : e);
     }
   }
-  smallLog('catalog_items.json não encontrado — comportamentos de busca de item ficarão limitados.');
-  return {};
+
+  if (!rawObj) {
+    smallLog('catalog_items.json não encontrado — comportamentos de busca de item ficarão limitados.');
+    return { items: [], byName: new Map(), byCode: new Map(), source: null };
+  }
+
+  // Normalizar para um array de itens: { name, code, price }
+  const items = [];
+  try {
+    if (Array.isArray(rawObj)) {
+      // formato: [{ name, code, price, ... }, ...]
+      for (const it of rawObj) {
+        const name = String(it.name || it.nome || it.label || '').trim();
+        const code = String(it.code || it.codigo || it.cod || '').trim();
+        const price = ('price' in it) ? it.price : (it.preco || it.valor || null);
+        if (name || code) items.push({ name: name || code, code: code || '', price: price });
+      }
+    } else if (rawObj && typeof rawObj === 'object') {
+      const vals = Object.values(rawObj);
+      if (vals.length > 0 && (typeof vals[0] !== 'object' || vals[0] === null)) {
+          // escolher uma amostra não-nula para inferir tipo
+          const sample = vals.find(v => v !== null && v !== undefined);
+          if (typeof sample === 'number') {
+            // mapeamento name -> price
+            for (const [k, v] of Object.entries(rawObj)) {
+              items.push({ name: String(k).trim(), code: '', price: v });
+            }
+          } else if (typeof sample === 'string') {
+            // mapeamento name -> code (ex: "MILHO 48 KG": "MIL4801")
+            for (const [k, v] of Object.entries(rawObj)) {
+              items.push({ name: String(k).trim(), code: String(v).trim(), price: null });
+            }
+          } else {
+            // fallback seguro: tratar como name -> rawValue
+            for (const [k, v] of Object.entries(rawObj)) {
+              items.push({ name: String(k).trim(), code: '', price: v });
+            }
+          }
+        } else {
+        // entradas como: { "COD123": { name: "MILHO 24 KG", code: "COD123", price: 47 }, ... }
+        for (const [k, v] of Object.entries(rawObj)) {
+          if (v && typeof v === 'object') {
+            const name = String(v.name || v.nome || v.label || '').trim() || String(k).trim();
+            const code = String(v.code || v.codigo || v.cod || k).trim();
+            const price = ('price' in v) ? v.price : (v.preco || v.valor || null);
+            items.push({ name, code, price });
+          } else {
+            // fallback seguro
+            items.push({ name: String(k).trim(), code: '', price: v });
+          }
+        }
+      }
+    }
+  } catch (e) {
+    smallLog('Erro ao normalizar catalog_items.json:', e && e.message ? e.message : e);
+  }
+
+  // índices normalizados (chaves em UPPER + sem acento)
+  function keyStr(s) { return normalizeString(String(s || '')); }
+
+  const byName = new Map(); // key = normalized name => item
+  const byCode = new Map(); // key = normalized code => item
+  for (const it of items) {
+    const n = keyStr(it.name);
+    const c = keyStr(it.code);
+    const entry = { name: it.name, code: it.code || null, price: (it.price !== undefined ? it.price : null) };
+    if (n) byName.set(n, entry);
+    if (c) byCode.set(c, entry);
+  }
+
+  smallLog('catalog_items.json carregado de', loadedFrom, 'items(normalizados):', items.length, 'byName:', byName.size, 'byCode:', byCode.size);
+  return { items, byName, byCode, source: loadedFrom };
 }
 const CATALOG = tryLoadCatalog();
 
@@ -41,27 +115,69 @@ function normalizeString(s) {
 }
 
 function findCatalogMatch(userText) {
-  // devolve { key, price } se encontrou, ou null
+  // devolve null se nada; se achar único => { key, name, code, price }
+  // se múltiplos, devolve um candidato com `.multiple` contendo o array
   if (!userText) return null;
   const norm = normalizeString(userText);
 
-  // exact match first
-  for (const k of Object.keys(CATALOG)) {
-    if (normalizeString(k) === norm) return { key: k, price: CATALOG[k] };
+  // shortcuts
+  const byCode = (CATALOG && CATALOG.byCode) ? CATALOG.byCode : new Map();
+  const byName = (CATALOG && CATALOG.byName) ? CATALOG.byName : new Map();
+
+  // 1) tentativa exata por código (prioridade)
+  if (byCode.has(norm)) {
+    const i = byCode.get(norm);
+    return { key: i.name, name: i.name, code: i.code, price: i.price };
   }
-  // contains match (catalog key contains userText) or vice-versa
-  for (const k of Object.keys(CATALOG)) {
-    const nk = normalizeString(k);
-    if (nk.includes(norm) || norm.includes(nk)) return { key: k, price: CATALOG[k] };
+
+  // 2) tentativa exata por nome
+  if (byName.has(norm)) {
+    const i = byName.get(norm);
+    return { key: i.name, name: i.name, code: i.code, price: i.price };
   }
-  // token match: try each token of userText and match catalog
-  const tokens = norm.split(' ').filter(Boolean);
-  for (const k of Object.keys(CATALOG)) {
-    const nk = normalizeString(k);
-    let matches = 0;
-    for (const t of tokens) if (nk.includes(t)) matches++;
-    if (matches >= Math.max(1, Math.floor(tokens.length/2))) return { key: k, price: CATALOG[k] };
+
+  // 3) correspondências parciais por nome / código (includes)
+  const nameMatches = [];
+  for (const [k, v] of byName) {
+    if (k.includes(norm) || norm.includes(k)) nameMatches.push(v);
   }
+  const codeMatches = [];
+  for (const [k, v] of byCode) {
+    if (k.includes(norm) || norm.includes(k)) codeMatches.push(v);
+  }
+
+  // 4) token heuristic (similar ao seu algoritmo antigo)
+  const all = [...nameMatches, ...codeMatches];
+  if (all.length === 0) {
+    const tokens = norm.split(' ').filter(Boolean);
+    for (const [k, v] of byName) {
+      let matches = 0;
+      for (const t of tokens) if (k.includes(t)) matches++;
+      if (matches >= Math.max(1, Math.floor(tokens.length / 2))) all.push(v);
+    }
+  }
+
+  // dedup
+  const unique = [];
+  const seen = new Set();
+  for (const it of all) {
+    const id = (it.code && it.code.trim()) || it.name;
+    if (!seen.has(id)) {
+      seen.add(id);
+      unique.push(it);
+    }
+  }
+
+  if (unique.length === 1) {
+    const i = unique[0];
+    return { key: i.name, name: i.name, code: i.code, price: i.price };
+  }
+  if (unique.length > 1) {
+    // devolve o primeiro candidato + lista em .multiple (mantém compatibilidade com uso atual)
+    const i = unique[0];
+    return { key: i.name, name: i.name, code: i.code, price: i.price, multiple: unique };
+  }
+
   return null;
 }
 
