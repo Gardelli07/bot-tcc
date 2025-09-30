@@ -437,8 +437,7 @@ async function sendOrderSummary(to, estado) {
   const lines = [
     '🧾 *Resumo do Orçamento*',
     `Nome: ${d.nome || '(não informado)'}`,
-    `Item: ${d.item || '(não informado)'}`,
-    `Quantidade: ${qty}`,
+    `Item: \n${d.item || '(não informado)'}`,
     `Endereço:\n${addrText}`,
     `Entrega: ${d.entrega || '(não informado)'}`,
     `Pagamento: ${d.pagamento || '(não informado)'}`
@@ -468,8 +467,7 @@ function buildOrderReportForGroup(dados, from) {
     '🧾 *Novo Orçamento Confirmado*',
     `De: ${from}`,
     `Nome: ${d.nome || '(não informado)'}`,
-    `Item: ${d.item || (d.itemKey ? `${d.quantidade || 1} x ${d.itemKey}` : '(não informado)')}`,
-    `Quantidade: ${d.quantidade || 1}`,
+    `Item: \n${d.item || (d.itemKey ? `${d.quantidade || 1} x ${d.itemKey}` : '(não informado)')}`,
     '---',
     `Endereço: ${d.endereco || '(não informado)'}`,
     `Entrega: ${d.entrega || '(não informado)'}`,
@@ -767,56 +765,186 @@ if (estado.etapa === 'handoff') {
       // PEDIDO flow with CEP -> confirmação -> número/complemento OR manual
       if (estado.etapa === 'pedido_nome') {
         estado.dados.nome = msg.body || '';
-        await msg.reply('Informe o *quantidade e item*:\nexemplo: "2x MILHO MOÍDO 24 KG" ou "MILHO MOÍDO 24 KG"');
+        await msg.reply('Informe o *item*:\nexemplo: "MILHO MOÍDO 24 KG"');
         estado.etapa = 'pedido_item';
         return;
       }
 
-      if (estado.etapa === 'pedido_item') {
-        const body = (msg.body || '').trim();
-        estado.dados.itemRaw = body; // guarda o texto cru
+      // === INÍCIO: fluxo de item multi-entrada com confirmação e edição antes da quantidade ===
+if (estado.etapa === 'pedido_item') {
+  // usuário enviou nome do item (pode já conter quantidade)
+  const body = (msg.body || '').trim();
+  estado.dados.itemRaw = body;
 
-        // parsear quantidade + item
-        const parsed = parseQuantityAndItem(body);
-        estado.dados.quantidade = parsed.qty || 1;
-        const itemText = (parsed.itemText || parsed.itemText === '') ? parsed.itemText : body;
+  // parsear quantidade + item (se o usuário já enviou "2x MILHO")
+  const parsed = parseQuantityAndItem(body);
+  const suggestedQty = parsed.qty || 1;
+  const itemText = (parsed.itemText || parsed.itemText === '') ? parsed.itemText : body;
+  const itemTextUpper = String(itemText).toUpperCase();
+  estado.dados.itemRawUpper = itemTextUpper;
 
-        // transformar em MAIÚSCULAS para consulta mais assertiva
-        const itemTextUpper = String(itemText).toUpperCase();
-        estado.dados.itemRawUpper = itemTextUpper;
+  // buscar no catálogo
+  const match = findCatalogMatch(itemTextUpper);
 
-        // procurar no catálogo usando a versão em maiúsculas (o find também normaliza)
-        const match = findCatalogMatch(itemTextUpper);
-        if (!match) {
-          // item não encontrado
-          await client.sendMessage(from,
-            '❗ Não encontrei esse item no catálogo.\n' +
-            'Digite o item exatamente como está no catálogo (ex: "MILHO MOÍDO 24 KG") e, se quiser, informe a quantidade antes (ex: "2x MILHO MOÍDO 24 KG").\n'
-          );
-          estado.etapa = 'pedido_item'; // mantém na mesma etapa
-          return;
-        }
+  // guarda item temporário em estado (antes de confirmar quantidade)
+  estado._currentItem = {
+    nameCandidate: match ? match.key : itemText,
+    catalogMatch: match || null,
+    qtyCandidate: suggestedQty
+  };
 
-  // item encontrado — salvar chave canônica (mantemos preço internamente se quiser usar depois)
-estado.dados.itemKey = match.key;
-estado.dados.item = `${estado.dados.quantidade} x ${match.key}`;
-
-  // SE estiver vindo de uma edição (flag), volta ao resumo sem pedir CEP
-if (estado._editingItem) {
-  delete estado._editingItem;
-  await client.sendMessage(from, `✔️ Item atualizado: ${estado.dados.item}`);
-  await sendOrderSummary(from, estado);
+  // pedir confirmação/editar antes de solicitar quantidade
+  if (match) {
+    await client.sendMessage(from,
+      `Encontrei: *${match.key}*.\nResponda:\n*SIM* — confirmar esse item\n*EDITAR* — digitar outro nome\n*CANCELAR* — cancelar pedido`
+    );
+  } else {
+    await client.sendMessage(from,
+      `❗ Não encontrei no catálogo. Será usado: *${itemText}*.\nResponda:\n*SIM* — confirmar esse item\n*EDITAR* — digitar outro nome\n*CANCELAR* — cancelar pedido`
+    );
+  }
+  estado.etapa = 'pedido_item_confirm';
   return;
 }
 
-  // fluxo normal (novo pedido): pede CEP como antes
+// confirmação do item encontrado / nome livre (antes de pedir quantidade)
+if (estado.etapa === 'pedido_item_confirm') {
+  const opt = (msg.body || '').trim().toLowerCase();
+  if (opt === 'sim' || /^sim\b/i.test(opt)) {
+    // avançar para pedir quantidade (o usuário pode já ter especificado)
+    estado.etapa = 'pedido_item_qty';
+    await client.sendMessage(from, `Quantidade (envie um número).`);
+    return;
+  }
+  if (opt === 'editar') {
+    // volta para digitar o item novamente
+    delete estado._currentItem;
+    estado.etapa = 'pedido_item';
+    await client.sendMessage(from, 'Digite o nome do item novamente(ex:"MILHO MOÍDO 24 KG"):');
+    return;
+  }
+  if (opt === 'cancelar') {
+    userState[from] = { etapa: 'inicio', dados: {} };
+    await client.sendMessage(from, 'Registro cancelado. Voltando ao menu inicial...');
+    await sendPrimaryMenu(from);
+    return;
+  }
+  await client.sendMessage(from, 'Responda *SIM*, *EDITAR* ou *CANCELAR*.');
+  return;
+}
+
+// recebe a quantidade para o item confirmado
+if (estado.etapa === 'pedido_item_qty') {
+  const body = (msg.body || '').trim();
+  let q = parseInt(body.replace(/\D/g, ''), 10);
+  if (!(q > 0)) {
+    // se não for número, usar a sugestão (se houver) ou pedir de novo
+    if (estado._currentItem && estado._currentItem.qtyCandidate) {
+      q = estado._currentItem.qtyCandidate;
+    } else {
+      await client.sendMessage(from, 'Quantidade inválida. Digite um número (ex: 3).');
+      return;
+    }
+  }
+
+  // montar o item final e adicionar ao array
+  const itemNameFinal = (estado._currentItem && estado._currentItem.nameCandidate) ? estado._currentItem.nameCandidate : ('(item não identificado)');
+  const itemCatalog = (estado._currentItem && estado._currentItem.catalogMatch) ? estado._currentItem.catalogMatch : null;
+
+  // assegura array
+  if (!Array.isArray(estado.dados.items)) estado.dados.items = [];
+
+  estado.dados.items.push({
+    name: itemNameFinal,
+    catalogKey: itemCatalog ? itemCatalog.key : null,
+    price: itemCatalog ? itemCatalog.price : null,
+    quantity: q
+  });
+
+  // limpa current temp
+  delete estado._currentItem;
+
+  // pergunta se deseja adicionar mais ou finalizar
+  estado.etapa = 'pedido_item_more';
   await client.sendMessage(from,
-    `✔️ Item registrado: ${estado.dados.item}\n\n` +
-    'Agora, Digite o *CEP* (8 dígitos, somente números):'
+    `Item adicionado: *${itemNameFinal}* \nquantidade: ${q}\n\n` +
+    `Responda:\n*ADICIONAR* — adicionar mais um item\n*FINALIZAR* — finalizar itens e prosseguir (PEDIR CEP)\n*VER* — ver itens adicionados até agora`
   );
-  estado.etapa = 'pedido_cep';
   return;
 }
+
+// controlar adicionar mais / finalizar / ver
+if (estado.etapa === 'pedido_item_more') {
+  const opt = (msg.body || '').trim().toLowerCase();
+
+  if (opt === 'adicionar' || /^adicionar\b/i.test(opt) || opt === 'mais') {
+    estado.etapa = 'pedido_item';
+    await client.sendMessage(from, 'Digite o próximo item:');
+    return;
+  }
+
+  if (opt === 'ver') {
+    if (!Array.isArray(estado.dados.items) || estado.dados.items.length === 0) {
+      await client.sendMessage(from, 'Nenhum item adicionado ainda.');
+    } else {
+      let resumo = 'Itens adicionados até agora:\n\n';
+      estado.dados.items.forEach((it, idx) => {
+        resumo += `${idx + 1}. ${it.quantity} x ${it.name}\n`;
+      });
+      resumo += '\nResponda *ADICIONAR* ou *FINALIZAR*.';
+      await client.sendMessage(from, resumo);
+    }
+    return;
+  }
+
+  if (opt === 'finalizar' || /^finalizar\b/i.test(opt) || opt === 'ok') {
+    // montar resumo compacto nos dados para o restante do fluxo
+    if (!Array.isArray(estado.dados.items) || estado.dados.items.length === 0) {
+      await client.sendMessage(from, 'Nenhum item adicionado. Para continuar, envie o item (ex: "MILHO...").');
+      estado.etapa = 'pedido_item';
+      return;
+    }
+        // resumo textual (cada item em linha separada)
+    const summaryParts = [];
+    let totalQty = 0;
+    for (let i = 0; i < (estado.dados.items || []).length; i++) {
+      const it = estado.dados.items[i];
+      // opcional: numerar os itens — removível se não quiser números
+      summaryParts.push(`${i + 1}. ${it.quantity} x ${it.name}`);
+      totalQty += Number(it.quantity || 0);
+    }
+
+    // salva o texto formatado com quebras de linha
+    estado.dados.item = summaryParts.join('\n');
+    estado.dados.quantidade = totalQty || 1;
+
+    await client.sendMessage(from,
+      `✔️ Itens registrados:\n\n${estado.dados.item}\n\nAgora, digite o *CEP* (8 dígitos, somente números):`
+    );
+
+    estado.etapa = 'pedido_cep';
+    return;
+  }
+
+  // qualquer outro texto: tenta interpretar como novo item direto (ex: "2x ARROZ")
+  // redireciona para etapa de novo item (interpreta body como entrada de item)
+  // para preservar UX, se o usuário digitou direto "2x ARROZ", tratamos como novo item
+  const maybeParsed = parseQuantityAndItem(msg.body || '');
+  if (maybeParsed && (maybeParsed.itemText || maybeParsed.qty > 1)) {
+    // definir corpo e reusar fluxo: definimos msg.body e chamamos handler novamente
+    // (mais simples: muda etapa para pedido_item e reexecuta sem recursão)
+    // armazenamos corpo temporariamente em estado para o próximo ciclo
+    estado._prefillNextItem = msg.body || '';
+    estado.etapa = 'pedido_item';
+    await client.sendMessage(from, 'Registrando novo item (detected input). Se for o próximo, confirme quando pedir.');
+    return;
+  }
+
+  await client.sendMessage(from, 'Responda *ADICIONAR*, *VER* ou *FINALIZAR*.');
+  return;
+}
+// === FIM: fluxo de item multi-entrada ===
+
 
 // Recebe o CEP -> consulta ViaCEP
 if (estado.etapa === 'pedido_cep') {
