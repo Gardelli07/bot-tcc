@@ -782,8 +782,6 @@ try {
 }
 // ----------------- fim bloco commands -----------------
 
-
-
       // --- se for mensagem de cliente
       // garante estado
       if (!userState[from]) userState[from] = { etapa: 'inicio', dados: {} };
@@ -832,8 +830,6 @@ if (estado.etapa === 'handoff') {
   // não processar automação enquanto handoff estiver ativo
   return;
 }
-
-
       // estado: inicio -> enviar menu primario
       if (estado.etapa === 'inicio') {
         if (!dentroHorario()) {
@@ -881,7 +877,7 @@ if (estado.etapa === 'handoff') {
       // PEDIDO flow with CEP -> confirmação -> número/complemento OR manual
       if (estado.etapa === 'pedido_nome') {
         estado.dados.nome = msg.body || '';
-        await msg.reply('Informe o *item*:\nexemplo: "MILHO MOÍDO 24 KG"');
+        await msg.reply('Informe o *item*:\nexemplo: "MILHO MOÍDO 24 KG" ou "MIL2404"');
         estado.etapa = 'pedido_item';
         return;
       }
@@ -910,44 +906,55 @@ if (estado.etapa === 'pedido_item') {
   };
 
   // pedir confirmação/editar antes de solicitar quantidade
-  if (match) {
-    await client.sendMessage(from,
-      `Encontrei: *${match.key}*.\nResponda:\n*SIM* — confirmar esse item\n*EDITAR* — digitar outro nome\n*CANCELAR* — cancelar pedido`
-    );
-  } else {
-    await client.sendMessage(from,
-      `❗ Não encontrei no catálogo. Será usado: *${itemText}*.\nResponda:\n*SIM* — confirmar esse item\n*EDITAR* — digitar outro nome\n*CANCELAR* — cancelar pedido`
-    );
-  }
-  estado.etapa = 'pedido_item_confirm';
-  return;
+if (match) {
+  await client.sendMessage(from,
+    `Encontrei: *${match.key}*.\nResponda com o número:\n*1* Confirmar esse item\n*2* Digitar outro nome\n*3* Cancelar pedido`
+  );
+} else {
+  await client.sendMessage(from,
+    `❗ Não encontrei no catálogo.\nResponda com o número:\n*2* Digitar outro nome\n*3* Cancelar pedido`
+  );
+}
+estado.etapa = 'pedido_item_confirm';
+return;
+
 }
 
 // confirmação do item encontrado / nome livre (antes de pedir quantidade)
 if (estado.etapa === 'pedido_item_confirm') {
-  const opt = (msg.body || '').trim().toLowerCase();
-  if (opt === 'sim' || /^sim\b/i.test(opt)) {
+  const optRaw = (msg.body || '').trim();
+  const opt = optRaw.toLowerCase();
+
+  // 1 => CONFIRMAR (aceita também "sim")
+  if (opt === '1' || /^1\b/.test(opt) || opt === 'sim' || /^sim\b/.test(opt)) {
     // avançar para pedir quantidade (o usuário pode já ter especificado)
     estado.etapa = 'pedido_item_qty';
     await client.sendMessage(from, `Quantidade (envie um número).`);
     return;
   }
-  if (opt === 'editar') {
+
+  // 2 => EDITAR (aceita também "editar")
+  if (opt === '2' || /^2\b/.test(opt) || opt === 'editar' || /^editar\b/.test(opt)) {
     // volta para digitar o item novamente
     delete estado._currentItem;
     estado.etapa = 'pedido_item';
-    await client.sendMessage(from, 'Digite o nome do item novamente(ex:"MILHO MOÍDO 24 KG"):');
+    await client.sendMessage(from, 'Digite o nome do item novamente (ex: "MILHO MOÍDO 24 KG"):');
     return;
   }
-  if (opt === 'cancelar') {
+
+  // 3 => CANCELAR (aceita também "cancelar")
+  if (opt === '3' || /^3\b/.test(opt) || opt === 'cancelar' || /^cancelar\b/.test(opt)) {
     userState[from] = { etapa: 'inicio', dados: {} };
     await client.sendMessage(from, 'Registro cancelado. Voltando ao menu inicial...');
     await sendPrimaryMenu(from);
     return;
   }
-  await client.sendMessage(from, 'Responda *SIM*, *EDITAR* ou *CANCELAR*.');
+
+  // fallback: pedir de novo usando números
+  await client.sendMessage(from, 'Responda *1*, *2* ou *3*.');
   return;
 }
+
 
 // recebe a quantidade para o item confirmado
 if (estado.etapa === 'pedido_item_qty') {
@@ -963,43 +970,85 @@ if (estado.etapa === 'pedido_item_qty') {
     }
   }
 
-  // montar o item final e adicionar ao array
-  const itemNameFinal = (estado._currentItem && estado._currentItem.nameCandidate) ? estado._currentItem.nameCandidate : ('(item não identificado)');
-  const itemCatalog = (estado._currentItem && estado._currentItem.catalogMatch) ? estado._currentItem.catalogMatch : null;
+// montar o item final e adicionar ao array
+const itemNameFinal = (estado._currentItem && estado._currentItem.nameCandidate) ? estado._currentItem.nameCandidate : '(item não identificado)';
+const itemCatalog = (estado._currentItem && estado._currentItem.catalogMatch) ? estado._currentItem.catalogMatch : null;
 
-  // assegura array
-  if (!Array.isArray(estado.dados.items)) estado.dados.items = [];
+// assegura array
+if (!Array.isArray(estado.dados.items)) estado.dados.items = [];
 
-  estado.dados.items.push({
-    name: itemNameFinal,
-    catalogKey: itemCatalog ? itemCatalog.key : null,
-    price: itemCatalog ? itemCatalog.price : null,
-    quantity: q
-  });
+// normaliza nome para comparação
+const normalizedName = String(itemNameFinal).trim().toUpperCase();
+
+// tenta encontrar item existente: primeiro por catalogKey (se houver), senão por nome
+let existingIndex = -1;
+if (itemCatalog && itemCatalog.key) {
+  existingIndex = estado.dados.items.findIndex(it => it.catalogKey && it.catalogKey === itemCatalog.key);
+}
+if (existingIndex === -1) {
+  existingIndex = estado.dados.items.findIndex(it => String(it.name || '').trim().toUpperCase() === normalizedName);
+}
+
+if (existingIndex !== -1) {
+  // já existe: soma quantidades
+  const prevQty = Number(estado.dados.items[existingIndex].quantity || 0);
+  const addQty = Number(q || 0);
+  const newQty = prevQty + addQty;
+  estado.dados.items[existingIndex].quantity = newQty;
+
+  // atualiza campos ausentes (se necessário)
+  if (!estado.dados.items[existingIndex].catalogKey && itemCatalog) {
+    estado.dados.items[existingIndex].catalogKey = itemCatalog.key;
+  }
+  if (!estado.dados.items[existingIndex].price && itemCatalog) {
+    estado.dados.items[existingIndex].price = itemCatalog.price;
+  }
 
   // limpa current temp
   delete estado._currentItem;
 
-  // pergunta se deseja adicionar mais ou finalizar
+  // responde com a quantidade total atualizada para esse item
   estado.etapa = 'pedido_item_more';
   await client.sendMessage(from,
-    `Item adicionado: *${itemNameFinal}* \nquantidade: ${q}\n\n` +
-    `Responda:\n*ADICIONAR* — adicionar mais um item\n*FINALIZAR* — finalizar itens e prosseguir (PEDIR CEP)\n*VER* — ver itens adicionados até agora`
+    `Item adicionado: *${itemNameFinal}* \nquantidade: ${newQty}\n\n` +
+    `Responda com o número:\n*1* Adicionar mais um item\n*2* Finalizar itens e prosseguir (PEDIR CEP)\n*3* Ver itens adicionados até agora`
   );
   return;
+}
+
+// se não existe, cria nova entrada
+estado.dados.items.push({
+  name: itemNameFinal,
+  catalogKey: itemCatalog ? itemCatalog.key : null,
+  price: itemCatalog ? itemCatalog.price : null,
+  quantity: q
+});
+
+// limpa current temp
+delete estado._currentItem;
+
+// pergunta se deseja adicionar mais ou finalizar
+estado.etapa = 'pedido_item_more';
+await client.sendMessage(from,
+  `Item adicionado: *${itemNameFinal}* \nquantidade: ${q}\n\n` +
+  `Responda com o número:\n*1* Adicionar mais um item\n*2* Finalizar itens e prosseguir (PEDIR CEP)\n*3* Ver itens adicionados até agora`
+);
+return;
 }
 
 // controlar adicionar mais / finalizar / ver
 if (estado.etapa === 'pedido_item_more') {
   const opt = (msg.body || '').trim().toLowerCase();
 
-  if (opt === 'adicionar' || /^adicionar\b/i.test(opt) || opt === 'mais') {
+  // 1 => ADICIONAR
+  if (opt === '1' || /^1\b/.test(opt)) {
     estado.etapa = 'pedido_item';
     await client.sendMessage(from, 'Digite o próximo item:');
     return;
   }
 
-  if (opt === 'ver') {
+  // 3 => VER (mantive a ordem: 3 = VER)
+  if (opt === '3' || /^3\b/.test(opt)) {
     if (!Array.isArray(estado.dados.items) || estado.dados.items.length === 0) {
       await client.sendMessage(from, 'Nenhum item adicionado ainda.');
     } else {
@@ -1007,20 +1056,21 @@ if (estado.etapa === 'pedido_item_more') {
       estado.dados.items.forEach((it, idx) => {
         resumo += `${idx + 1}. ${it.quantity} x ${it.name}\n`;
       });
-      resumo += '\nResponda *ADICIONAR* ou *FINALIZAR*.';
+      resumo += '\nResponda *1* (ADICIONAR) ou *2* (FINALIZAR).';
       await client.sendMessage(from, resumo);
     }
     return;
   }
 
-  if (opt === 'finalizar' || /^finalizar\b/i.test(opt) || opt === 'ok') {
+  // 2 => FINALIZAR
+  if (opt === '2' || /^2\b/.test(opt)) {
     // montar resumo compacto nos dados para o restante do fluxo
     if (!Array.isArray(estado.dados.items) || estado.dados.items.length === 0) {
       await client.sendMessage(from, 'Nenhum item adicionado. Para continuar, envie o item (ex: "MILHO...").');
       estado.etapa = 'pedido_item';
       return;
     }
-        // resumo textual (cada item em linha separada)
+    // resumo textual (cada item em linha separada)
     const summaryParts = [];
     let totalQty = 0;
     for (let i = 0; i < (estado.dados.items || []).length; i++) {
@@ -1042,24 +1092,19 @@ if (estado.etapa === 'pedido_item_more') {
     return;
   }
 
-  // qualquer outro texto: tenta interpretar como novo item direto (ex: "2x ARROZ")
-  // redireciona para etapa de novo item (interpreta body como entrada de item)
-  // para preservar UX, se o usuário digitou direto "2x ARROZ", tratamos como novo item
   const maybeParsed = parseQuantityAndItem(msg.body || '');
   if (maybeParsed && (maybeParsed.itemText || maybeParsed.qty > 1)) {
-    // definir corpo e reusar fluxo: definimos msg.body e chamamos handler novamente
-    // (mais simples: muda etapa para pedido_item e reexecuta sem recursão)
-    // armazenamos corpo temporariamente em estado para o próximo ciclo
     estado._prefillNextItem = msg.body || '';
     estado.etapa = 'pedido_item';
-    await client.sendMessage(from, 'Registrando novo item (detected input). Se for o próximo, confirme quando pedir.');
+    await client.sendMessage(from, 'Registrando novo item (entrada detectada). Confirme quando for solicitado.');
     return;
   }
 
-  await client.sendMessage(from, 'Responda *ADICIONAR*, *VER* ou *FINALIZAR*.');
+  await client.sendMessage(from, 'Responda *1*, *2* ou *3*.');
   return;
 }
 // === FIM: fluxo de item multi-entrada ===
+
 
 
 // Recebe o CEP -> consulta ViaCEP
