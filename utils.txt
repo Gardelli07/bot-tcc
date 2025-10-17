@@ -3,11 +3,11 @@ rd /s /q .wwebjs_cache
 npm init -y
 npm install whatsapp-web.js qrcode-terminal moment-timezone dotenv
 
+nas opções 1/2/3 aceitar apenas os numeros 
 
+milho moido 24kg (kg junto ao numero)
 
-
-
-
+MIL 24 04 (codigo separado )
 
 
 
