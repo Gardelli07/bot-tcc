@@ -8,6 +8,7 @@ const path = require("path");
 const os = require("os");
 const https = require("https");
 const connections = require("./connections");
+const COMMAND_GROUP = process.env.COMMAND_GROUP_ID || "120363405061423609@g.us";
 // CATALOGO (catalog_items.json) — carga e utilidades
 function tryLoadCatalog() {
   const candidates = [
@@ -335,6 +336,47 @@ function resolveCatalogFiles() {
   return Array.from(new Set(found));
 }
 
+// --- estado de handoff / heartbeat (compartilhado por cliente) ---
+const inHandoff = new Set(); // chats que estão em handoff
+
+// normaliza entrada para '5515991234567@c.us'
+function normalizeId(input) {
+  if (!input) return null;
+  input = String(input).trim();
+  if (input.endsWith("@c.us")) return input;
+  const digits = input.replace(/\D/g, "");
+  if (!digits) return null;
+  return `${digits}@c.us`;
+}
+
+// --- Handoff minimal (sem heartbeat) ---
+async function startHandoff(client, chatId) {
+  if (!chatId) return;
+  if (inHandoff.has(chatId)) return;
+  inHandoff.add(chatId);
+  try {
+    await client.sendMessage(
+      chatId,
+      "Você foi transferido para um atendente humano. Por favor, aguarde o atendimento."
+    );
+  } catch (e) {
+    console.error("Erro ao notificar chat em handoff", chatId, e);
+  }
+}
+
+async function endHandoff(client, chatId) {
+  if (!chatId) return;
+  if (inHandoff.has(chatId)) inHandoff.delete(chatId);
+  try {
+    await client.sendMessage(
+      chatId,
+      "O atendimento foi encerrado. O bot voltou a funcionar."
+    );
+  } catch (e) {
+    /* ignore */
+  }
+}
+
 // CRIA CLIENTE E HANDLERS
 function createClient(puppeteerOptions) {
   const client = new Client({
@@ -576,11 +618,164 @@ function createClient(puppeteerOptions) {
     return lines.join("\n");
   }
 
+  // Retorna true se o comando foi tratado (usa client.sendMessage internamente)
+  async function handleHandoffCommand(
+    msg,
+    body,
+    isFromCommandGroup,
+    chatId,
+    replyTo
+  ) {
+    const m = body.match(/^!handoff(?:\s+(.+))?$/i);
+    if (!m) return false;
+
+    const targetRaw = m[1];
+    const target = targetRaw ? normalizeId(targetRaw) : chatId;
+    if (!target) {
+      await client.sendMessage(
+        replyTo,
+        "Telefone inválido. Use: !handoff 5515991234567"
+      );
+      return true;
+    }
+
+    await startHandoff(client, target);
+
+    if (isFromCommandGroup) {
+      const author = msg.author || "desconhecido";
+      const authorShort = String(author)
+        .replace(/@c\.us$/i, "")
+        .replace(/\D/g, "");
+      await client.sendMessage(
+        replyTo,
+        `Handoff iniciado para ${target} (comando emitido por ${authorShort}).`
+      );
+    } else if (target !== chatId) {
+      await client.sendMessage(replyTo, `Handoff iniciado para ${target}`);
+    } else {
+      await client.sendMessage(replyTo, "Handoff iniciado.");
+    }
+
+    return true;
+  }
+
+  async function handleBotCommand(
+    msg,
+    body,
+    isFromCommandGroup,
+    chatId,
+    replyTo
+  ) {
+    const m = body.match(/^!bot(?:\s+(.+))?$/i);
+    if (!m) return false;
+
+    const targetRaw = m[1];
+    const target = targetRaw ? normalizeId(targetRaw) : chatId;
+    if (!target) {
+      await client.sendMessage(
+        replyTo,
+        "Telefone inválido. Use: !bot 5515991234567"
+      );
+      return true;
+    }
+
+    if (!inHandoff.has(target)) {
+      await client.sendMessage(
+        replyTo,
+        `Esse chat (${target}) não está em handoff.`
+      );
+      return true;
+    }
+
+    // encerra o handoff (envia mensagem "O atendimento foi encerrado...")
+    await endHandoff(client, target);
+
+    // --- aqui: zera o estado do usuário e reenvia o menu inicial ---
+    try {
+      // reseta estado do usuário para evitar que o bot continue de onde parou
+      if (!userState) userState = {};
+      userState[target] = { etapa: "inicio", dados: {} };
+
+      // envia menu inicial diretamente para o usuário (chat privado)
+      // se o target não for um chat privado, sendPrimaryMenu fará log/erro silencioso
+      await sendPrimaryMenu(target);
+    } catch (e) {
+      smallLog(
+        "Erro ao reiniciar estado do usuário após !bot:",
+        e && e.message ? e.message : e
+      );
+    }
+
+    // confirmação para quem emitiu o comando (grupo ou autor)
+    if (isFromCommandGroup) {
+      const author = msg.author || "desconhecido";
+      const authorShort = String(author)
+        .replace(/@c\.us$/i, "")
+        .replace(/\D/g, "");
+      await client.sendMessage(
+        replyTo,
+        `Handoff encerrado para ${target} (comando emitido por ${authorShort}).`
+      );
+    } else {
+      await client.sendMessage(replyTo, `Handoff encerrado: ${target}`);
+    }
+
+    return true;
+  }
+
   client.on("message", async (msg) => {
     try {
       const from = msg.from; // chat id (user or staff)
       const textRaw = (msg.body || "").trim();
       const text = textRaw.toLowerCase();
+
+      // Determina se a mensagem veio do grupo de comandos
+      const isFromCommandGroup = msg.from === COMMAND_GROUP;
+
+      // determina o chat 'efetivo' (para comandos podemos permitir grupo)
+      const chatId = msg.fromMe && msg.to ? msg.to : msg.from;
+
+      // Se o chat estiver em handoff, ignore o fluxo automático
+      if (!isFromCommandGroup && chatId && inHandoff.has(chatId)) {
+        return; // interrompe o processamento para evitar que o bot responda enquanto há atendimento humano
+      }
+
+      if (!chatId) {
+        // segue o fluxo normal se não houver chat resolvível
+      } else {
+        // somente processar comandos quando:
+        // - chat privado (termina em @c.us) OU
+        // - mensagem vinda do group de comandos
+        if (chatId.endsWith("@c.us") || isFromCommandGroup) {
+          const replyTo = isFromCommandGroup
+            ? COMMAND_GROUP
+            : msg.fromMe
+            ? chatId
+            : msg.from;
+
+          // tentar executar comandos (cada handler retorna true se tratou)
+          if (
+            await handleHandoffCommand(
+              msg,
+              textRaw,
+              isFromCommandGroup,
+              chatId,
+              replyTo
+            )
+          )
+            return;
+          if (
+            await handleBotCommand(
+              msg,
+              textRaw,
+              isFromCommandGroup,
+              chatId,
+              replyTo
+            )
+          )
+            return;
+        }
+      }
 
       let chat = null;
       try {
