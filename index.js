@@ -1,14 +1,16 @@
 require("dotenv").config();
 const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
 const qrcode = require("qrcode-terminal");
-const net = require("net");
 const fs = require("fs");
-const child = require("child_process");
 const path = require("path");
-const os = require("os");
 const https = require("https");
 const connections = require("./connections");
 const COMMAND_GROUP = process.env.COMMAND_GROUP_ID || "120363405061423609@g.us";
+const http = require("http");
+const CONFIRMED_GROUP_ID =
+  process.env.CONFIRMED_GROUP_ID || process.env.PEDIDOS_CONFIRMADOS_ID || null;
+const DUVIDAS_GROUP_ID = process.env.DUVIDAS_GROUP_ID || null;
+
 // CATALOGO (catalog_items.json) — carga e utilidades
 function tryLoadCatalog() {
   const candidates = [
@@ -151,6 +153,48 @@ function normalizeString(s) {
   return noAcc.toString().trim().toUpperCase().replace(/\s+/g, " ");
 }
 
+// Envia array de pedidos para sua API /pedido
+function postPedidoAPI(data) {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify(data);
+    const hostname = process.env.API_HOST || "localhost";
+    const port = process.env.API_PORT ? Number(process.env.API_PORT) : 8080;
+
+    const options = {
+      hostname,
+      port,
+      path: "/pedido",
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(payload),
+      },
+      timeout: 10000, // 10s
+    };
+
+    const reqApi = http.request(options, (res) => {
+      let body = "";
+      res.on("data", (chunk) => (body += chunk));
+      res.on("end", () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          resolve({ status: res.statusCode, body });
+        } else {
+          reject(new Error(`API /pedido respondeu ${res.statusCode}: ${body}`));
+        }
+      });
+    });
+
+    reqApi.on("error", (err) => reject(err));
+    reqApi.on("timeout", () => {
+      reqApi.destroy();
+      reject(new Error("Timeout ao conectar com API /pedido"));
+    });
+
+    reqApi.write(payload);
+    reqApi.end();
+  });
+}
+
 function findCatalogMatch(userText) {
   // devolve null se nada; se achar único => { key, name, code, price }
   // se múltiplos, devolve um candidato com `.multiple` contendo o array
@@ -249,10 +293,6 @@ function parseQuantityAndItem(text) {
   // fallback: qty 1, item = texto bruto
   return { qty: 1, itemText: s };
 }
-
-const CONFIRMED_GROUP_ID =
-  process.env.CONFIRMED_GROUP_ID || process.env.PEDIDOS_CONFIRMADOS_ID || null;
-const DUVIDAS_GROUP_ID = process.env.DUVIDAS_GROUP_ID || null;
 
 // logger
 function smallLog(...args) {
@@ -1298,27 +1338,112 @@ function createClient(puppeteerOptions) {
           );
 
           // enviar resumo do orçamento para o grupo (fazemos em background, sem enviar nada mais ao usuário)
-          (async () => {
-            try {
-              const targetGroup = CONFIRMED_GROUP_ID || STAFF_CHAT_ID;
-              if (targetGroup) {
-                const report = buildOrderReportForGroup(
-                  estado.dados || {},
-                  from
-                );
+          // CONFIRMAÇÃO (resposta do usuário = 1)
+          await client.sendMessage(
+            from,
+            `✅ Orçamento confirmado e registrado!\n\nObrigado! Em breve entraremos em contato.\n\nSe quiser voltar ao menu inicial, só digitar "menu".`
+          );
+
+          // enviar resumo do orçamento para o grupo e também enviar os dados para a API /pedido
+          try {
+            const targetGroup = CONFIRMED_GROUP_ID || STAFF_CHAT_ID;
+            const report = buildOrderReportForGroup(estado.dados || {}, from);
+
+            // 1) enviar relatório para o grupo (se existir)
+            if (targetGroup) {
+              try {
                 await client.sendMessage(targetGroup, report);
-              } else {
                 smallLog(
-                  "Nenhum CONFIRMED_GROUP_ID configurado — orçamento não enviado a grupo."
+                  "Resumo do orçamento enviado para o grupo:",
+                  targetGroup
+                );
+              } catch (errSend) {
+                smallLog(
+                  "Falha ao enviar resumo ao grupo:",
+                  errSend && errSend.message ? errSend.message : errSend
                 );
               }
-            } catch (e) {
+            } else {
               smallLog(
-                "Erro ao enviar resumo para grupo de orçamentos:",
-                e && e.message ? e.message : e
+                "Nenhum CONFIRMED_GROUP_ID configurado — pulando envio ao grupo."
               );
             }
-          })();
+
+            // 2) construir payload para /pedido — um objeto por item (como sua rota espera)
+            const items = Array.isArray(estado.dados.items)
+              ? estado.dados.items
+              : [];
+
+            const cepInfo =
+              estado.dados._lastCepInfo ||
+              estado.dados._lastCepInfo_edit ||
+              null;
+            const cepDigits =
+              (cepInfo && cepInfo.cep) ||
+              estado.dados._lastCepAttempt ||
+              estado.dados._lastCepAttempt_edit ||
+              "";
+
+            const payload = items.map((it) => {
+              return {
+                cep: cepDigits
+                  ? cepDigits.replace(/\D/g, "")
+                  : String(estado.dados._lastCepAttempt || ""),
+                numero: estado.dados.numero || "",
+                complemento: estado.dados.complemento || "",
+                bairro: (cepInfo && cepInfo.bairro) || "",
+                logradouro: (cepInfo && cepInfo.logradouro) || "",
+                cidade:
+                  (cepInfo && cepInfo.localidade) || estado.dados.cidade || "", // <--- ADICIONADO
+                nome: estado.dados.nome || from,
+                produto: it.name,
+                metodo_pagamento: estado.dados.pagamento || "",
+                preco:
+                  it.price != null
+                    ? it.price
+                    : estado.dados.preco != null
+                    ? estado.dados.preco
+                    : 0,
+                quantidade: Number(it.quantity || 1),
+              };
+            });
+
+            if (payload.length === 0) {
+              smallLog("Nenhum item encontrado para enviar à rota /pedido");
+            } else {
+              try {
+                const resp = await postPedidoAPI(payload);
+                smallLog("POST /pedido OK:", resp.status);
+                // opcional: notificar o grupo ou o usuário sobre sucesso no banco
+                if (targetGroup) {
+                  await client.sendMessage(
+                    targetGroup,
+                    `✅ ${payload.length} pedido(s) gravado(s) no banco com sucesso.`
+                  );
+                }
+              } catch (errApi) {
+                smallLog(
+                  "Erro ao enviar pedido para API:",
+                  errApi && errApi.message ? errApi.message : errApi
+                );
+                // notifica o grupo/usuário se desejar
+                if (targetGroup) {
+                  await client.sendMessage(
+                    targetGroup,
+                    `⚠️ Falha ao gravar pedido no banco: ${String(
+                      errApi.message || errApi
+                    )}`
+                  );
+                }
+              }
+            }
+          } catch (err) {
+            smallLog(
+              "Erro no fluxo de envio de resumo / pedido:",
+              err && err.message ? err.message : err
+            );
+          }
+
           userState[from] = { etapa: "done", dados: {} };
           return;
         }
