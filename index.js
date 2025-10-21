@@ -24,27 +24,12 @@ function tryLoadCatalog() {
   let loadedFrom = null;
 
   for (const p of candidates) {
-    try {
-      if (fs.existsSync(p)) {
-        const raw = fs.readFileSync(p, "utf8");
-        rawObj = JSON.parse(raw);
-        loadedFrom = p;
-        break;
-      }
-    } catch (e) {
-      smallLog(
-        "Erro lendo catalog_items.json em",
-        p,
-        e && e.message ? e.message : e
-      );
+    if (fs.existsSync(p)) {
+      const raw = fs.readFileSync(p, "utf8");
+      rawObj = JSON.parse(raw);
+      loadedFrom = p;
+      break;
     }
-  }
-
-  if (!rawObj) {
-    smallLog(
-      "catalog_items.json não encontrado — comportamentos de busca de item ficarão limitados."
-    );
-    return { items: [], byName: new Map(), byCode: new Map(), source: null };
   }
 
   // Normalizar para um array de itens: { name, code, price }
@@ -146,14 +131,12 @@ const CATALOG = tryLoadCatalog();
 
 function normalizeString(s) {
   if (!s) return "";
-  // remover acentos, transformar em maiúsculas e normalizar espaços
   const noAcc = s.normalize
     ? s.normalize("NFD").replace(/[\u0300-\u036f]/g, "")
     : s;
   return noAcc.toString().trim().toUpperCase().replace(/\s+/g, " ");
 }
 
-// Envia array de pedidos para sua API /pedido
 function postPedidoAPI(data) {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(data);
@@ -196,28 +179,22 @@ function postPedidoAPI(data) {
 }
 
 function findCatalogMatch(userText) {
-  // devolve null se nada; se achar único => { key, name, code, price }
-  // se múltiplos, devolve um candidato com `.multiple` contendo o array
   if (!userText) return null;
   const norm = normalizeString(userText);
 
-  // shortcuts
   const byCode = CATALOG && CATALOG.byCode ? CATALOG.byCode : new Map();
   const byName = CATALOG && CATALOG.byName ? CATALOG.byName : new Map();
 
-  // 1) tentativa exata por código (prioridade)
   if (byCode.has(norm)) {
     const i = byCode.get(norm);
     return { key: i.name, name: i.name, code: i.code, price: i.price };
   }
 
-  // 2) tentativa exata por nome
   if (byName.has(norm)) {
     const i = byName.get(norm);
     return { key: i.name, name: i.name, code: i.code, price: i.price };
   }
 
-  // 3) correspondências parciais por nome / código (includes)
   const nameMatches = [];
   for (const [k, v] of byName) {
     if (k.includes(norm) || norm.includes(k)) nameMatches.push(v);
@@ -227,18 +204,6 @@ function findCatalogMatch(userText) {
     if (k.includes(norm) || norm.includes(k)) codeMatches.push(v);
   }
 
-  // 4) token heuristic (similar ao seu algoritmo antigo)
-  const all = [...nameMatches, ...codeMatches];
-  if (all.length === 0) {
-    const tokens = norm.split(" ").filter(Boolean);
-    for (const [k, v] of byName) {
-      let matches = 0;
-      for (const t of tokens) if (k.includes(t)) matches++;
-      if (matches >= Math.max(1, Math.floor(tokens.length / 2))) all.push(v);
-    }
-  }
-
-  // dedup
   const unique = [];
   const seen = new Set();
   for (const it of all) {
@@ -294,7 +259,6 @@ function parseQuantityAndItem(text) {
   return { qty: 1, itemText: s };
 }
 
-// logger
 function smallLog(...args) {
   console.log(...args);
 }
@@ -345,7 +309,7 @@ function formatAddressFromCep(obj) {
   if (obj.cep) parts.push(`CEP: ${obj.cep}`);
   return parts.join(", ");
 }
-// CATALOGO: localizar imagens
+
 function resolveCatalogFiles() {
   const filenames = [
     "variedades.jpg",
@@ -376,7 +340,6 @@ function resolveCatalogFiles() {
   return Array.from(new Set(found));
 }
 
-// --- estado de handoff / heartbeat (compartilhado por cliente) ---
 const inHandoff = new Set(); // chats que estão em handoff
 
 // normaliza entrada para '5515991234567@c.us'
@@ -389,32 +352,22 @@ function normalizeId(input) {
   return `${digits}@c.us`;
 }
 
-// --- Handoff minimal (sem heartbeat) ---
 async function startHandoff(client, chatId) {
-  if (!chatId) return;
-  if (inHandoff.has(chatId)) return;
+  if (!chatId || inHandoff.has(chatId)) return;
   inHandoff.add(chatId);
-  try {
-    await client.sendMessage(
-      chatId,
-      "Você foi transferido para um atendente humano. Por favor, aguarde o atendimento."
-    );
-  } catch (e) {
-    console.error("Erro ao notificar chat em handoff", chatId, e);
-  }
+  await client.sendMessage(
+    chatId,
+    "Você foi transferido para um atendente humano. Por favor, aguarde o atendimento."
+  );
 }
 
 async function endHandoff(client, chatId) {
   if (!chatId) return;
-  if (inHandoff.has(chatId)) inHandoff.delete(chatId);
-  try {
-    await client.sendMessage(
-      chatId,
-      "O atendimento foi encerrado. O bot voltou a funcionar."
-    );
-  } catch (e) {
-    /* ignore */
-  }
+  inHandoff.delete(chatId);
+  await client.sendMessage(
+    chatId,
+    "O atendimento foi encerrado. O bot voltou a funcionar."
+  );
 }
 
 // CRIA CLIENTE E HANDLERS
@@ -425,13 +378,11 @@ function createClient(puppeteerOptions) {
   });
 
   client.on("qr", (qr) => qrcode.generate(qr, { small: true }));
-  let SELF_ID = null;
 
   client.on("ready", () => {
     smallLog("=== BOT PRONTO ===");
   });
 
-  // memória simples de estado por usuário
   let userState = {};
 
   function dentroHorario() {
@@ -450,9 +401,6 @@ function createClient(puppeteerOptions) {
 
   // catálogo
   const catalogFiles = resolveCatalogFiles();
-  if (catalogFiles.length)
-    smallLog("Imagens de catálogo encontradas:", catalogFiles);
-  else smallLog("Nenhuma imagem de catálogo encontrada — fallback para texto.");
 
   // envia menu primário (forçado)
   async function sendPrimaryMenu(to) {
@@ -460,16 +408,15 @@ function createClient(puppeteerOptions) {
     userState[to].etapa = "menu_principal";
     await client.sendMessage(
       to,
-      "👋 Bem-vindo!\nEscolha uma opção:\n\n" +
+      "👋 Bem-vindo! ao atendimento virtual da RBS Cereais\nPara iniciarmos escolha uma opção:\n\n" +
         "1️⃣ Ver Catálogo\n" +
         "2️⃣ Fazer Orçamento\n" +
         "3️⃣ Tirar Dúvidas\n" +
         "4️⃣ Acessar Site\n\n" +
-        "Responda apenas com o número da opção."
+        'Responda apenas com o número da opção.\nSe em qualquer momento quiser voltar ao menu inicial, só digitar "menu".'
     );
   }
 
-  // envia imagens do catálogo (na conversa do usuário) — sem legenda, uma por uma
   async function sendCatalogImages(to) {
     if (!catalogFiles.length) {
       await client.sendMessage(
@@ -479,83 +426,24 @@ function createClient(puppeteerOptions) {
       return;
     }
 
-    const failed = []; // índices 1-based que falharam
-    const sent = []; // índices 1-based enviados com sucesso
-
     for (let i = 0; i < catalogFiles.length; i++) {
-      const filePathRaw = catalogFiles[i];
-      const filePath = path.resolve(filePathRaw); // usa caminho absoluto
+      const filePath = path.resolve(catalogFiles[i]);
+      if (!fs.existsSync(filePath)) continue;
+
+      const media = MessageMedia.fromFilePath(filePath);
       try {
-        if (!fs.existsSync(filePath)) {
-          smallLog("Arquivo não encontrado (catalog):", filePath);
-          failed.push(i + 1);
-          continue;
-        }
-
-        let media;
-        try {
-          media = MessageMedia.fromFilePath(filePath);
-        } catch (e) {
-          smallLog(
-            "Erro MessageMedia.fromFilePath:",
-            filePath,
-            e && e.message ? e.message : e
-          );
-          failed.push(i + 1);
-          continue;
-        }
-
-        // tenta enviar e observa o resultado
-        try {
-          await client.sendMessage(to, media, { caption: "" });
-          // sucesso: registra apenas na lista 'sent' (sem imprimir no console)
-          sent.push(i + 1);
-        } catch (errSend) {
-          smallLog(
-            "Erro ao enviar (client.sendMessage):",
-            filePath,
-            errSend && errSend.message ? errSend.message : errSend
-          );
-          if (!sent.includes(i + 1)) failed.push(i + 1);
-        }
-
-        // delay inline para evitar sobrecarga
-        await new Promise((resolve) => setTimeout(resolve, 400));
-      } catch (err) {
-        smallLog(
-          "Erro inesperado ao processar arquivo do catálogo:",
-          filePath,
-          err && err.message ? err.message : err
-        );
-        if (!sent.includes(i + 1)) failed.push(i + 1);
+        await client.sendMessage(to, media, { caption: "" });
+      } catch {
+        // ignora erros
       }
+
+      await new Promise((resolve) => setTimeout(resolve, 400));
     }
 
-    // resumo final: relatório coerente com o que realmente aconteceu
-    if (failed.length === 0) {
-      await client.sendMessage(
-        to,
-        '✅ Enviamos o catálogo completo. Deseja fazer um orçamento? \nResponda com *2* para iniciar o orçamento.\n\nSe quiser voltar ao menu inicial, só digitar "menu".'
-      );
-    } else if (sent.length === 0) {
-      await client
-        .sendMessage(
-          to,
-          `⚠️ Não foi possível enviar nenhuma das páginas: ${failed.join(
-            ", "
-          )}.\nVerifique os arquivos do catálogo no servidor e as permissões.`
-        )
-        .catch(() => {});
-    } else {
-      await client
-        .sendMessage(
-          to,
-          `⚠️ Não foi possível enviar as páginas: ${failed.join(
-            ", "
-          )}.\nEnviamos as páginas: ${sent.join(", ")}.`
-        )
-        .catch(() => {});
-    }
+    await client.sendMessage(
+      to,
+      "✅ Enviamos o catálogo completo. Deseja fazer um orçamento? \nResponda com *2* para iniciar o orçamento."
+    );
   }
 
   function formatAddressForSummary(dados) {
@@ -568,29 +456,20 @@ function createClient(puppeteerOptions) {
         (dados.complemento && String(dados.complemento).trim()) ||
         (info.complemento && String(info.complemento).trim()) ||
         "";
-
-      // linha 1: logradouro + número (ex: "Rua X 158")
       const line1 = [info.logradouro || "", numero]
         .filter(Boolean)
         .join(" ")
         .trim();
-
-      // linha 2: bairro + complemento (se houver). separador por " - " para ficar legível
       const line2Parts = [];
       if (info.bairro) line2Parts.push(info.bairro);
       if (complemento) line2Parts.push(`Compl.: ${complemento}`);
       const line2 = line2Parts.join(" - ");
-
-      // linha 3: cidade, UF e CEP
       const cityUf = [info.localidade || "", info.uf || ""]
         .filter(Boolean)
         .join(", ");
       const line3 = cityUf + (cepDigits ? " " + cepDigits : "");
-
       return [line1, line2, line3].filter(Boolean).join("\n");
     }
-
-    // se o endereço já foi preenchido manualmente (string), manteir o comportamento anterior
     if (
       dados.endereco &&
       typeof dados.endereco === "string" &&
@@ -603,9 +482,9 @@ function createClient(puppeteerOptions) {
         .filter(Boolean)
         .join("\n");
     }
-
     return "(não informado)";
   }
+
   async function sendOrderSummary(to, estado) {
     const d = estado.dados || {};
     const qty = Number(d.quantidade) || 1;
@@ -639,12 +518,14 @@ function createClient(puppeteerOptions) {
     estado.etapa = "pedido_confirm";
   }
 
-  // Gera texto simplificado do pedido para envio ao grupo (sem opções de edição)
   function buildOrderReportForGroup(dados, from) {
     const d = dados || {};
+    const fromNumber = String(from || "desconhecido")
+      .replace(/@c\.us$/i, "") // remove sufixo @c.us se existir
+      .replace(/\D/g, ""); // deixa só dígitos
     const lines = [
       "🧾 *Novo Orçamento Confirmado*",
-      `De: ${from}`,
+      `De: ${fromNumber || "desconhecido"}`,
       `Nome: ${d.nome || "(não informado)"}`,
       `Item: \n${
         d.item ||
@@ -658,7 +539,6 @@ function createClient(puppeteerOptions) {
     return lines.join("\n");
   }
 
-  // Retorna true se o comando foi tratado (usa client.sendMessage internamente)
   async function handleHandoffCommand(
     msg,
     body,
@@ -674,7 +554,7 @@ function createClient(puppeteerOptions) {
     if (!target) {
       await client.sendMessage(
         replyTo,
-        "Telefone inválido. Use: !handoff 5515991234567"
+        "Telefone inválido. Use: !handoff 5515xxxxxxxxx"
       );
       return true;
     }
@@ -683,15 +563,22 @@ function createClient(puppeteerOptions) {
 
     if (isFromCommandGroup) {
       const author = msg.author || "desconhecido";
-      const authorShort = String(author)
+      const authorShort = String(author).replace(/@c\.us$/i, ""); // já remove o @c.us, mantém o número
+
+      const targetShort = String(target)
         .replace(/@c\.us$/i, "")
-        .replace(/\D/g, "");
+        .replace(/\D/g, ""); // deixa só números
+
       await client.sendMessage(
         replyTo,
-        `Handoff iniciado para ${target} (comando emitido por ${authorShort}).`
+        `Handoff iniciado para ${targetShort}.`
       );
     } else if (target !== chatId) {
-      await client.sendMessage(replyTo, `Handoff iniciado para ${target}`);
+      const targetShort = String(target).replace(/@c\.us$/i, "");
+      await client.sendMessage(
+        replyTo,
+        `Handoff iniciado para ${targetShort}.`
+      );
     } else {
       await client.sendMessage(replyTo, "Handoff iniciado.");
     }
@@ -714,7 +601,7 @@ function createClient(puppeteerOptions) {
     if (!target) {
       await client.sendMessage(
         replyTo,
-        "Telefone inválido. Use: !bot 5515991234567"
+        "Telefone inválido. Use: !bot 5515xxxxxxxxx"
       );
       return true;
     }
@@ -727,17 +614,10 @@ function createClient(puppeteerOptions) {
       return true;
     }
 
-    // encerra o handoff (envia mensagem "O atendimento foi encerrado...")
     await endHandoff(client, target);
-
-    // --- aqui: zera o estado do usuário e reenvia o menu inicial ---
     try {
-      // reseta estado do usuário para evitar que o bot continue de onde parou
       if (!userState) userState = {};
       userState[target] = { etapa: "inicio", dados: {} };
-
-      // envia menu inicial diretamente para o usuário (chat privado)
-      // se o target não for um chat privado, sendPrimaryMenu fará log/erro silencioso
       await sendPrimaryMenu(target);
     } catch (e) {
       smallLog(
@@ -751,13 +631,22 @@ function createClient(puppeteerOptions) {
       const author = msg.author || "desconhecido";
       const authorShort = String(author)
         .replace(/@c\.us$/i, "")
-        .replace(/\D/g, "");
+        .replace(/\D/g, ""); // deixa só números
+
+      const targetShort = String(target)
+        .replace(/@c\.us$/i, "")
+        .replace(/\D/g, ""); // deixa só números
+
       await client.sendMessage(
         replyTo,
-        `Handoff encerrado para ${target} (comando emitido por ${authorShort}).`
+        `Handoff encerrado para ${targetShort}.`
       );
     } else {
-      await client.sendMessage(replyTo, `Handoff encerrado: ${target}`);
+      const targetShort = String(target)
+        .replace(/@c\.us$/i, "")
+        .replace(/\D/g, "");
+
+      await client.sendMessage(replyTo, `Handoff encerrado: ${targetShort}`);
     }
 
     return true;
@@ -768,32 +657,21 @@ function createClient(puppeteerOptions) {
       const from = msg.from; // chat id (user or staff)
       const textRaw = (msg.body || "").trim();
       const text = textRaw.toLowerCase();
+      const isFromCommandGroup = msg.from === COMMAND_GROUP; // Determina se a mensagem veio do grupo de comandos
+      const chatId = msg.fromMe && msg.to ? msg.to : msg.from; // determina o chat 'efetivo' (para comandos podemos permitir grupo)
 
-      // Determina se a mensagem veio do grupo de comandos
-      const isFromCommandGroup = msg.from === COMMAND_GROUP;
-
-      // determina o chat 'efetivo' (para comandos podemos permitir grupo)
-      const chatId = msg.fromMe && msg.to ? msg.to : msg.from;
-
-      // Se o chat estiver em handoff, ignore o fluxo automático
       if (!isFromCommandGroup && chatId && inHandoff.has(chatId)) {
-        return; // interrompe o processamento para evitar que o bot responda enquanto há atendimento humano
+        return;
       }
 
       if (!chatId) {
-        // segue o fluxo normal se não houver chat resolvível
       } else {
-        // somente processar comandos quando:
-        // - chat privado (termina em @c.us) OU
-        // - mensagem vinda do group de comandos
         if (chatId.endsWith("@c.us") || isFromCommandGroup) {
           const replyTo = isFromCommandGroup
             ? COMMAND_GROUP
             : msg.fromMe
             ? chatId
             : msg.from;
-
-          // tentar executar comandos (cada handler retorna true se tratou)
           if (
             await handleHandoffCommand(
               msg,
@@ -820,11 +698,8 @@ function createClient(puppeteerOptions) {
       let chat = null;
       try {
         chat = await msg.getChat();
-      } catch (e) {
-        /* ignore */
-      }
+      } catch (e) {}
 
-      // garante estado
       if (!userState[from]) userState[from] = { etapa: "inicio", dados: {} };
       const estado = userState[from];
 
@@ -841,7 +716,6 @@ function createClient(puppeteerOptions) {
         return;
       }
 
-      // estado: inicio -> enviar menu primario
       if (estado.etapa === "inicio") {
         if (!dentroHorario()) {
           await msg.reply(
@@ -853,12 +727,10 @@ function createClient(puppeteerOptions) {
         return;
       }
 
-      // MENU PRINCIPAL
       if (estado.etapa === "menu_principal") {
         if (text === "1" || text.includes("catalog")) {
           await msg.reply("📦 Enviando o catálogo...");
           await sendCatalogImages(from);
-          // permanece no menu
           return;
         }
         if (text === "2") {
@@ -895,11 +767,10 @@ function createClient(puppeteerOptions) {
         return;
       }
 
-      // PEDIDO flow with CEP -> confirmação -> número/complemento OR manual
       if (estado.etapa === "pedido_nome") {
         estado.dados.nome = msg.body || "";
         await msg.reply(
-          'Informe o *item*:\nexemplo: "MILHO MOÍDO 24 KG" ou "MIL2404"'
+          'Informe o *item*:\nexemplo: " Milho Ensacado 25kg" ou "MIL2515"'
         );
         estado.etapa = "pedido_item";
         return;
@@ -907,86 +778,60 @@ function createClient(puppeteerOptions) {
 
       // === INÍCIO: fluxo de item multi-entrada com confirmação e edição antes da quantidade ===
       if (estado.etapa === "pedido_item") {
-        // usuário enviou nome do item (pode já conter quantidade)
         const body = (msg.body || "").trim();
         estado.dados.itemRaw = body;
 
-        // parsear quantidade + item (se o usuário já enviou "2x MILHO")
         const parsed = parseQuantityAndItem(body);
         const suggestedQty = parsed.qty || 1;
         const itemText =
           parsed.itemText || parsed.itemText === "" ? parsed.itemText : body;
+
         const itemTextUpper = String(itemText).toUpperCase();
         estado.dados.itemRawUpper = itemTextUpper;
-
-        // buscar no catálogo
         const match = findCatalogMatch(itemTextUpper);
 
-        // guarda item temporário em estado (antes de confirmar quantidade)
         estado._currentItem = {
           nameCandidate: match ? match.key : itemText,
           catalogMatch: match || null,
           qtyCandidate: suggestedQty,
         };
 
-        // pedir confirmação/editar antes de solicitar quantidade
         if (match) {
           await client.sendMessage(
             from,
-            `Encontrei: *${match.key}*.\nResponda com o número:\n*1* Confirmar esse item\n*2* Digitar outro nome\n*3* Cancelar pedido`
+            `Encontrei: *${match.key}*\n1️⃣Confirmar esse item\n2️⃣ Digitar outro nome\n3️⃣ Cancelar pedido`
           );
         } else {
           await client.sendMessage(
             from,
-            `❗ Não encontrei no catálogo.\nResponda com o número:\n*2* Digitar outro nome\n*3* Cancelar pedido`
+            `❗ Não encontrei no catálogo.\n2️⃣ Digitar outro nome\n3️⃣ Cancelar pedido`
           );
         }
         estado.etapa = "pedido_item_confirm";
         return;
       }
 
-      // confirmação do item encontrado / nome livre (antes de pedir quantidade)
       if (estado.etapa === "pedido_item_confirm") {
         const optRaw = (msg.body || "").trim();
         const opt = optRaw.toLowerCase();
 
-        // 1 => CONFIRMAR (aceita também "sim")
-        if (
-          opt === "1" ||
-          /^1\b/.test(opt) ||
-          opt === "sim" ||
-          /^sim\b/.test(opt)
-        ) {
-          // avançar para pedir quantidade (o usuário pode já ter especificado)
+        if (opt === "1") {
           estado.etapa = "pedido_item_qty";
           await client.sendMessage(from, `Quantidade (envie um número).`);
           return;
         }
 
-        // 2 => EDITAR (aceita também "editar")
-        if (
-          opt === "2" ||
-          /^2\b/.test(opt) ||
-          opt === "editar" ||
-          /^editar\b/.test(opt)
-        ) {
-          // volta para digitar o item novamente
+        if (opt === "2") {
           delete estado._currentItem;
           estado.etapa = "pedido_item";
           await client.sendMessage(
             from,
-            'Digite o nome do item novamente (ex: "MILHO MOÍDO 24 KG"):'
+            'Digite o nome do item novamente (ex: "Milho Ensacado 25kg" ou "MIL2515"):'
           );
           return;
         }
 
-        // 3 => CANCELAR (aceita também "cancelar")
-        if (
-          opt === "3" ||
-          /^3\b/.test(opt) ||
-          opt === "cancelar" ||
-          /^cancelar\b/.test(opt)
-        ) {
+        if (opt === "3") {
           userState[from] = { etapa: "inicio", dados: {} };
           await client.sendMessage(
             from,
@@ -996,17 +841,14 @@ function createClient(puppeteerOptions) {
           return;
         }
 
-        // fallback: pedir de novo usando números
         await client.sendMessage(from, "Responda *1*, *2* ou *3*.");
         return;
       }
 
-      // recebe a quantidade para o item confirmado
       if (estado.etapa === "pedido_item_qty") {
         const body = (msg.body || "").trim();
         let q = parseInt(body.replace(/\D/g, ""), 10);
         if (!(q > 0)) {
-          // se não for número, usar a sugestão (se houver) ou pedir de novo
           if (estado._currentItem && estado._currentItem.qtyCandidate) {
             q = estado._currentItem.qtyCandidate;
           } else {
@@ -1018,7 +860,6 @@ function createClient(puppeteerOptions) {
           }
         }
 
-        // montar o item final e adicionar ao array
         const itemNameFinal =
           estado._currentItem && estado._currentItem.nameCandidate
             ? estado._currentItem.nameCandidate
@@ -1028,13 +869,9 @@ function createClient(puppeteerOptions) {
             ? estado._currentItem.catalogMatch
             : null;
 
-        // assegura array
         if (!Array.isArray(estado.dados.items)) estado.dados.items = [];
 
-        // normaliza nome para comparação
         const normalizedName = String(itemNameFinal).trim().toUpperCase();
-
-        // tenta encontrar item existente: primeiro por catalogKey (se houver), senão por nome
         let existingIndex = -1;
         if (itemCatalog && itemCatalog.key) {
           existingIndex = estado.dados.items.findIndex(
@@ -1051,7 +888,6 @@ function createClient(puppeteerOptions) {
         }
 
         if (existingIndex !== -1) {
-          // já existe: soma quantidades
           const prevQty = Number(
             estado.dados.items[existingIndex].quantity || 0
           );
@@ -1059,28 +895,23 @@ function createClient(puppeteerOptions) {
           const newQty = prevQty + addQty;
           estado.dados.items[existingIndex].quantity = newQty;
 
-          // atualiza campos ausentes (se necessário)
           if (!estado.dados.items[existingIndex].catalogKey && itemCatalog) {
             estado.dados.items[existingIndex].catalogKey = itemCatalog.key;
           }
           if (!estado.dados.items[existingIndex].price && itemCatalog) {
             estado.dados.items[existingIndex].price = itemCatalog.price;
           }
-
-          // limpa current temp
           delete estado._currentItem;
 
-          // responde com a quantidade total atualizada para esse item
           estado.etapa = "pedido_item_more";
           await client.sendMessage(
             from,
             `Item adicionado: *${itemNameFinal}* \nquantidade: ${newQty}\n\n` +
-              `Responda com o número:\n*1* Adicionar mais um item\n*2* Finalizar itens e prosseguir (PEDIR CEP)\n*3* Ver itens adicionados até agora`
+              `1️⃣Adicionar mais um item\n2️⃣Finalizar itens e prosseguir (CEP)\n3️⃣Ver itens adicionados até agora`
           );
           return;
         }
 
-        // se não existe, cria nova entrada
         estado.dados.items.push({
           name: itemNameFinal,
           catalogKey: itemCatalog ? itemCatalog.key : null,
@@ -1088,31 +919,26 @@ function createClient(puppeteerOptions) {
           quantity: q,
         });
 
-        // limpa current temp
         delete estado._currentItem;
 
-        // pergunta se deseja adicionar mais ou finalizar
         estado.etapa = "pedido_item_more";
         await client.sendMessage(
           from,
           `Item adicionado: *${itemNameFinal}* \nquantidade: ${q}\n\n` +
-            `Responda com o número:\n*1* Adicionar mais um item\n*2* Finalizar itens e prosseguir (PEDIR CEP)\n*3* Ver itens adicionados até agora`
+            `1️⃣Adicionar mais um item\n2️⃣Finalizar itens e prosseguir (CEP)\n3️⃣Ver itens adicionados até agora`
         );
         return;
       }
 
-      // controlar adicionar mais / finalizar / ver
       if (estado.etapa === "pedido_item_more") {
         const opt = (msg.body || "").trim().toLowerCase();
 
-        // 1 => ADICIONAR
         if (opt === "1" || /^1\b/.test(opt)) {
           estado.etapa = "pedido_item";
           await client.sendMessage(from, "Digite o próximo item:");
           return;
         }
 
-        // 3 => VER (mantive a ordem: 3 = VER)
         if (opt === "3" || /^3\b/.test(opt)) {
           if (
             !Array.isArray(estado.dados.items) ||
@@ -1124,15 +950,13 @@ function createClient(puppeteerOptions) {
             estado.dados.items.forEach((it, idx) => {
               resumo += `${idx + 1}. ${it.quantity} x ${it.name}\n`;
             });
-            resumo += "\nResponda *1* (ADICIONAR) ou *2* (FINALIZAR).";
+            resumo += "\n1️⃣(ADICIONAR)\n2️⃣(FINALIZAR).";
             await client.sendMessage(from, resumo);
           }
           return;
         }
 
-        // 2 => FINALIZAR
         if (opt === "2" || /^2\b/.test(opt)) {
-          // montar resumo compacto nos dados para o restante do fluxo
           if (
             !Array.isArray(estado.dados.items) ||
             estado.dados.items.length === 0
@@ -1144,17 +968,14 @@ function createClient(puppeteerOptions) {
             estado.etapa = "pedido_item";
             return;
           }
-          // resumo textual (cada item em linha separada)
           const summaryParts = [];
           let totalQty = 0;
           for (let i = 0; i < (estado.dados.items || []).length; i++) {
             const it = estado.dados.items[i];
-            // opcional: numerar os itens — removível se não quiser números
             summaryParts.push(`${i + 1}. ${it.quantity} x ${it.name}`);
             totalQty += Number(it.quantity || 0);
           }
 
-          // salva o texto formatado com quebras de linha
           estado.dados.item = summaryParts.join("\n");
           estado.dados.quantidade = totalQty || 1;
 
@@ -1173,7 +994,7 @@ function createClient(puppeteerOptions) {
           estado.etapa = "pedido_item";
           await client.sendMessage(
             from,
-            "Registrando novo item (entrada detectada). Confirme quando for solicitado."
+            "Registrando novo item. Confirme quando for solicitado."
           );
           return;
         }
@@ -1181,9 +1002,7 @@ function createClient(puppeteerOptions) {
         await client.sendMessage(from, "Responda *1*, *2* ou *3*.");
         return;
       }
-      // === FIM: fluxo de item multi-entrada ===
 
-      // Recebe o CEP -> consulta ViaCEP
       if (estado.etapa === "pedido_cep") {
         const cepRaw = (msg.body || "").trim();
         const cepDigits = cepRaw.replace(/\D/g, "").slice(0, 8);
@@ -1200,30 +1019,26 @@ function createClient(puppeteerOptions) {
         estado.dados._lastCepInfo = cepInfo || null;
 
         if (!cepInfo) {
-          // NÃO oferecer opção de endereço manual — pedir para reenviar o CEP
           await msg.reply(
             "CEP não encontrado. Por favor, verifique e envie o CEP novamente (8 dígitos)."
           );
-          estado.etapa = "pedido_cep"; // permanece na mesma etapa esperando novo CEP
+          estado.etapa = "pedido_cep";
           return;
         }
 
         const addrText = formatAddressFromCep(cepInfo);
-        // envia o endereço encontrado e pede confirmação (apenas confirmar ou tentar outro CEP)
         await client.sendMessage(
           from,
-          `Endereço encontrado:\n${addrText}\n\n1️⃣ Está correto (informar número e complemento)\n2️⃣ Tentar outro CEP`
+          `Endereço encontrado:\n${addrText}\n\n1️⃣ Está correto (continuar número e complemento)\n2️⃣ Tentar outro CEP`
         );
         estado.etapa = "pedido_cep_confirm";
         return;
       }
 
-      // Confirmação após mostrar CEP (sem opção manual)
       if (estado.etapa === "pedido_cep_confirm") {
         const opt = (msg.body || "").trim();
 
-        // confirmação direta
-        if (opt === "1" || /^sim|confirm/i.test(opt.toLowerCase())) {
+        if (opt === "1") {
           const info = estado.dados._lastCepInfo;
           if (!info) {
             await client.sendMessage(
@@ -1233,25 +1048,22 @@ function createClient(puppeteerOptions) {
             estado.etapa = "pedido_cep";
             return;
           }
-          // define parte do endereço (sem número/complemento)
           const base = formatAddressFromCep(info);
-          estado.dados.endereco = base; // ainda sem número/complemento
+          estado.dados.endereco = base;
           await client.sendMessage(
             from,
-            "📍Ótimo, agora envie o *número* da residência/loja:"
+            "Certo, agora envie o *número* da residência/loja:"
           );
           estado.etapa = "pedido_numero";
           return;
         }
 
-        // tentar outro CEP
         if (opt === "2") {
           await client.sendMessage(from, "Ok. Digite o CEP novamente:");
           estado.etapa = "pedido_cep";
           return;
         }
 
-        // se pessoa enviou outro CEP diretamente
         const possibleCep = (msg.body || "").replace(/\D/g, "").slice(0, 8);
         if (possibleCep.length === 8) {
           const cepInfo = await lookupCepRaw(possibleCep);
@@ -1270,7 +1082,7 @@ function createClient(puppeteerOptions) {
           const addrText = formatAddressFromCep(cepInfo);
           await client.sendMessage(
             from,
-            `Endereço encontrado:\n${addrText}\n\n1️⃣ Está correto (informar número e complemento)\n2️⃣ Tentar outro CEP`
+            `Endereço encontrado:\n${addrText}\n\n1️⃣ Está correto (continuar número e complemento)\n2️⃣ Tentar outro CEP`
           );
           estado.etapa = "pedido_cep_confirm";
           return;
@@ -1283,7 +1095,6 @@ function createClient(puppeteerOptions) {
         return;
       }
 
-      // Recebe o número (após confirmar CEP)
       if (estado.etapa === "pedido_numero") {
         const numero = (msg.body || "").trim();
         estado.dados.numero = numero;
@@ -1299,7 +1110,6 @@ function createClient(puppeteerOptions) {
         const complemento = (msg.body || "").trim();
         estado.dados.complemento =
           complemento && complemento.toLowerCase() !== "sem" ? complemento : "";
-        // ajusta campo endereco final juntando base + número + complemento
         const base =
           estado.dados.endereco ||
           (estado.dados._lastCepInfo
@@ -1311,7 +1121,6 @@ function createClient(puppeteerOptions) {
           parts.push(`Compl.: ${estado.dados.complemento}`);
         estado.dados.endereco = parts.filter(Boolean).join(", ");
 
-        // sem opção de retirada — definimos por padrão Delivery e seguimos para pagamento
         estado.dados.entrega = "Fretado";
         await client.sendMessage(
           from,
@@ -1321,55 +1130,29 @@ function createClient(puppeteerOptions) {
         return;
       }
 
-      // ... restante do fluxo (pedido_entrega e pedido_pagamento continuam iguais)
       if (estado.etapa === "pedido_pagamento") {
         estado.dados.pagamento = msg.body || "";
-        // envia resumo e pede confirmação/edição
         await sendOrderSummary(from, estado);
         return;
       }
 
-      // etapa: pedido_confirm -> interpreta escolha do usuário
       if (estado.etapa === "pedido_confirm") {
-        if (text === "1" || /^confirm/i.test(text) || /^sim/i.test(text)) {
+        if (text === "1") {
           await client.sendMessage(
             from,
             `✅ Orçamento confirmado e registrado!\n\nObrigado! Em breve entraremos em contato.\n\nSe quiser voltar ao menu inicial, só digitar "menu".`
           );
 
-          // enviar resumo do orçamento para o grupo (fazemos em background, sem enviar nada mais ao usuário)
-          // CONFIRMAÇÃO (resposta do usuário = 1)
-          await client.sendMessage(
-            from,
-            `✅ Orçamento confirmado e registrado!\n\nObrigado! Em breve entraremos em contato.\n\nSe quiser voltar ao menu inicial, só digitar "menu".`
-          );
-
-          // enviar resumo do orçamento para o grupo e também enviar os dados para a API /pedido
           try {
-            const targetGroup = CONFIRMED_GROUP_ID || STAFF_CHAT_ID;
+            const targetGroup = CONFIRMED_GROUP_ID;
             const report = buildOrderReportForGroup(estado.dados || {}, from);
 
-            // 1) enviar relatório para o grupo (se existir)
             if (targetGroup) {
               try {
                 await client.sendMessage(targetGroup, report);
-                smallLog(
-                  "Resumo do orçamento enviado para o grupo:",
-                  targetGroup
-                );
-              } catch (errSend) {
-                smallLog(
-                  "Falha ao enviar resumo ao grupo:",
-                  errSend && errSend.message ? errSend.message : errSend
-                );
-              }
-            } else {
-              smallLog(
-                "Nenhum CONFIRMED_GROUP_ID configurado — pulando envio ao grupo."
-              );
+              } catch {}
             }
 
-            // 2) construir payload para /pedido — um objeto por item (como sua rota espera)
             const items = Array.isArray(estado.dados.items)
               ? estado.dados.items
               : [];
@@ -1394,7 +1177,7 @@ function createClient(puppeteerOptions) {
                 bairro: (cepInfo && cepInfo.bairro) || "",
                 logradouro: (cepInfo && cepInfo.logradouro) || "",
                 cidade:
-                  (cepInfo && cepInfo.localidade) || estado.dados.cidade || "", // <--- ADICIONADO
+                  (cepInfo && cepInfo.localidade) || estado.dados.cidade || "",
                 nome: estado.dados.nome || from,
                 produto: it.name,
                 metodo_pagamento: estado.dados.pagamento || "",
@@ -1414,7 +1197,6 @@ function createClient(puppeteerOptions) {
               try {
                 const resp = await postPedidoAPI(payload);
                 smallLog("POST /pedido OK:", resp.status);
-                // opcional: notificar o grupo ou o usuário sobre sucesso no banco
                 if (targetGroup) {
                   await client.sendMessage(
                     targetGroup,
@@ -1426,7 +1208,6 @@ function createClient(puppeteerOptions) {
                   "Erro ao enviar pedido para API:",
                   errApi && errApi.message ? errApi.message : errApi
                 );
-                // notifica o grupo/usuário se desejar
                 if (targetGroup) {
                   await client.sendMessage(
                     targetGroup,
@@ -1448,11 +1229,10 @@ function createClient(puppeteerOptions) {
           return;
         }
 
-        // editar campos: 2..5 (5 agora é editar pagamento)
         if (text === "2") {
           await client.sendMessage(
             from,
-            "✏️ OK — envie o *novo nome* (nome do cliente/loja):"
+            "✏️ OK, envie o *novo nome* (nome do cliente/loja):"
           );
           estado.etapa = "pedido_edit_nome";
           return;
@@ -1460,7 +1240,7 @@ function createClient(puppeteerOptions) {
         if (text === "3") {
           await client.sendMessage(
             from,
-            '✏️ OK — envie o *novo item e quantidade* (ex: "2x MILHO MOÍDO 24 KG" ou "x2 MILHO MOIDO 24KG"):'
+            '✏️ OK, envie o *novo item e quantidade* (ex: "Milho Ensacado 25kg" ou "MIL2515"):'
           );
           estado.etapa = "pedido_item";
           estado._editingItem = true;
@@ -1479,13 +1259,12 @@ function createClient(puppeteerOptions) {
         if (text === "5") {
           await client.sendMessage(
             from,
-            "✏️ OK — envie o *novo método de pagamento* (Pix/Dinheiro/Boleto/Depósito Bancário/Cheque):"
+            "✏️ OK, envie o *novo método de pagamento* (Pix/Dinheiro/Boleto/Depósito Bancário/Cheque):"
           );
           estado.etapa = "pedido_edit_pagamento";
           return;
         }
 
-        // cancelar
         if (text === "0" || text === "cancel" || text === "cancelar") {
           userState[from] = { etapa: "inicio", dados: {} };
           await client.sendMessage(
@@ -1495,15 +1274,13 @@ function createClient(puppeteerOptions) {
           await sendPrimaryMenu(from);
           return;
         }
-        // nao entendeu
         await client.sendMessage(
           from,
-          "Não entendi sua opção. Responda com número: 1 confirmar, 2–6 editar, 0 cancelar."
+          "Não entendi sua opção.\n1️⃣confirma \n2️⃣–6️⃣editar \n0️⃣cancelar."
         );
         return;
       }
 
-      // edição de campos — cada estado trata a nova entrada e volta ao resumo
       if (estado.etapa === "pedido_edit_nome") {
         estado.dados.nome = msg.body || "";
         await client.sendMessage(from, "Nome atualizado.");
@@ -1520,7 +1297,6 @@ function createClient(puppeteerOptions) {
         const itemText =
           parsed.itemText || parsed.itemText === "" ? parsed.itemText : body;
 
-        // transformar em MAIÚSCULAS para consulta mais assertiva
         const itemTextUpper = String(itemText).toUpperCase();
         estado.dados.itemRawUpper = itemTextUpper;
 
@@ -1528,7 +1304,7 @@ function createClient(puppeteerOptions) {
         if (!match) {
           await client.sendMessage(
             from,
-            '❗ Não encontrei esse item no catálogo. Digite o item exatamente como está no catálogo (ex: "MILHO MOÍDO 24 KG") e, se quiser, informe a quantidade antes (ex: "2x MILHO MOÍDO 24 KG").'
+            '❗ Não encontrei esse item no catálogo. Digite o item exatamente como está no catálogo (ex: "Milho Ensacado 25kg" ou "MIL2515").'
           );
           estado.etapa = "pedido_edit_item";
           return;
@@ -1580,18 +1356,16 @@ function createClient(puppeteerOptions) {
         const addrText = formatAddressFromCep(cepInfo);
         await client.sendMessage(
           from,
-          `Endereço encontrado:\n${addrText}\n\n1️⃣ Está correto (informar número e complemento)\n2️⃣ Tentar outro CEP`
+          `Endereço encontrado:\n${addrText}\n\n1️⃣ Está correto (continuar número e complemento)\n2️⃣ Tentar outro CEP`
         );
         estado.etapa = "pedido_cep_edit_confirm";
         return;
       }
 
-      // Confirmação após mostrar CEP durante edição
       if (estado.etapa === "pedido_cep_edit_confirm") {
         const opt = (msg.body || "").trim();
 
-        // confirmação direta
-        if (opt === "1" || /^sim|confirm/i.test(opt.toLowerCase())) {
+        if (opt === "1") {
           const info = estado.dados._lastCepInfo_edit;
           if (!info) {
             await client.sendMessage(
@@ -1602,23 +1376,21 @@ function createClient(puppeteerOptions) {
             return;
           }
           const base = formatAddressFromCep(info);
-          estado.dados.endereco = base; // ainda sem número/complemento
+          estado.dados.endereco = base;
           await client.sendMessage(
             from,
-            "📍 Ótimo — agora envie o *número* da residência/loja:"
+            "Certo, agora envie o *número* da residência/loja:"
           );
           estado.etapa = "pedido_numero_edit";
           return;
         }
 
-        // tentar outro CEP
         if (opt === "2") {
           await client.sendMessage(from, "Ok. Digite o CEP novamente:");
           estado.etapa = "pedido_cep_edit";
           return;
         }
 
-        // se pessoa enviou outro CEP direto
         const possibleCep = (msg.body || "").replace(/\D/g, "").slice(0, 8);
         if (possibleCep.length === 8) {
           const cepInfo = await lookupCepRaw(possibleCep);
@@ -1637,7 +1409,7 @@ function createClient(puppeteerOptions) {
           const addrText = formatAddressFromCep(cepInfo);
           await client.sendMessage(
             from,
-            `Endereço encontrado:\n${addrText}\n\n1️⃣ Está correto (informar número e complemento)\n2️⃣ Tentar outro CEP`
+            `Endereço encontrado:\n${addrText}\n\n1️⃣ Está correto (continuar número e complemento)\n2️⃣ Tentar outro CEP`
           );
           estado.etapa = "pedido_cep_edit_confirm";
           return;
@@ -1650,7 +1422,6 @@ function createClient(puppeteerOptions) {
         return;
       }
 
-      // Recebe o número durante edição (após confirmar CEP)
       if (estado.etapa === "pedido_numero_edit") {
         const numero = (msg.body || "").trim();
         estado.dados.numero = numero;
@@ -1662,7 +1433,6 @@ function createClient(puppeteerOptions) {
         return;
       }
 
-      // Recebe complemento durante edição
       if (estado.etapa === "pedido_complemento_edit") {
         const complemento = (msg.body || "").trim();
         estado.dados.complemento =
@@ -1689,11 +1459,10 @@ function createClient(puppeteerOptions) {
         return;
       }
 
-      // DÚVIDAS
       if (estado.etapa === "duvidas") {
         if (text === "1") {
           await msg.reply(
-            '📌 FAQ:\n- Horário: 08h–18h\n-Pagamento: Pix, Dinheiro, Boleto, Depósito Bancário, Cheque\n- Entrega: Retirada ou Delivery\n\nSe quiser voltar ao menu inicial, só digitar "menu".'
+            '📌 FAQ:\n- Horário: 08h–18h\n- Pagamento: Pix, Dinheiro, Boleto, Depósito Bancário, Cheque\n\nSe quiser voltar ao menu inicial, só digitar "menu".'
           );
           estado.etapa = "fim";
           return;
@@ -1711,53 +1480,34 @@ function createClient(puppeteerOptions) {
         }
       }
       if (estado.etapa === "duvida_escrita") {
-        // grava localmente
         estado.dados.duvida = msg.body || "";
 
-        // confirma para o usuário (resposta curta) — comportamento parecido com confirmação de orçamento
-        try {
-          await client.sendMessage(
-            from,
-            '📩 Sua dúvida foi registrada. Em breve retornaremos por aqui.\n\nSe quiser voltar ao menu inicial, só digitar "menu".'
-          );
-        } catch (e) {
-          smallLog(
-            "Erro ao enviar confirmação de dúvida ao usuário:",
-            e && e.message ? e.message : e
-          );
-        }
+        await client.sendMessage(
+          from,
+          '📩 Sua dúvida foi registrada. Em breve retornaremos por aqui.\n\nSe quiser voltar ao menu inicial, só digitar "menu".'
+        );
 
-        // envia a dúvida para o grupo de Duvidas (ou fallback para STAFF_CHAT_ID) em background
         (async () => {
-          try {
-            const targetGroup = DUVIDAS_GROUP_ID || STAFF_CHAT_ID;
-            if (targetGroup) {
-              const snippet = String(estado.dados.duvida || "").trim();
-              const groupMsg = [
-                "📩 *Nova Dúvida Recebida*",
-                `De: ${from}`,
-                `Mensagem:`,
-                snippet || "(sem texto)",
-              ].join("\n");
-              await client.sendMessage(targetGroup, groupMsg);
-            } else {
-              smallLog(
-                "Nenhum DUVIDAS_GROUP_ID configurado — dúvida não enviada a grupo."
-              );
-            }
-          } catch (e) {
-            smallLog(
-              "Erro ao enviar dúvida para grupo:",
-              e && e.message ? e.message : e
-            );
+          const targetGroup = DUVIDAS_GROUP_ID || STAFF_CHAT_ID;
+          if (targetGroup) {
+            const snippet = String(estado.dados.duvida || "").trim();
+            const fromNumber = String(from || "desconhecido")
+              .replace(/@c\.us$/i, "")
+              .replace(/\D/g, "");
+            const groupMsg = [
+              "📩 *Nova Dúvida Recebida*",
+              `De: ${fromNumber}`,
+              "Mensagem:",
+              snippet || "(sem texto)",
+            ].join("\n");
+            await client.sendMessage(targetGroup, groupMsg);
           }
         })();
 
-        // encerra atendimento automático para este chat — aguarda próxima mensagem do usuário para reiniciar
         userState[from] = { etapa: "done", dados: {} };
         return;
       }
-      // FIM
+
       if (estado.etapa === "fim") {
         if (text === "0" || text === "menu" || text === "voltar") {
           userState[from] = { etapa: "inicio", dados: {} };
@@ -1770,7 +1520,6 @@ function createClient(puppeteerOptions) {
         );
         return;
       }
-      // Fallback geral: se nada bateu, envie menu
       await sendPrimaryMenu(from);
     } catch (err) {
       smallLog(
