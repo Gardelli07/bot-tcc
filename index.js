@@ -716,6 +716,221 @@ function createClient(puppeteerOptions) {
         return;
       }
 
+      // === Bloco a ser inserido ===
+      if (
+        textRaw &&
+        textRaw.toLowerCase().startsWith("novo orçamento, vendedor")
+      ) {
+        try {
+          smallLog(
+            "Recebido Orçamento importado (vendedor). Iniciando parse..."
+          );
+
+          const raw = textRaw.replace(/\r/g, "");
+          const lines = raw.split("\n").map((l) => l.trim());
+
+          // helpers
+          const getLineValue = (label) => {
+            const re = new RegExp("^" + label + ":\\s*(.+)$", "i");
+            const found = lines.find((l) => re.test(l));
+            return found ? found.replace(re, "$1").trim() : null;
+          };
+
+          const fromRaw = getLineValue("De") || getLineValue("DE");
+          const senderNormalized = normalizeId(fromRaw) || msg.from || null;
+
+          const nomeLinha = getLineValue("Nome") || getLineValue("NOME") || "";
+          const clienteNome =
+            nomeLinha ||
+            String(senderNormalized || msg.from || "")
+              .replace(/@c\.us$/i, "")
+              .replace(/\D/g, "") ||
+            "Desconhecido";
+
+          // pegar bloco de itens: encontra o índice da linha "Item:" e pega até Total: or --- or Endereço:
+          const idxItem = lines.findIndex((l) => /^Item:?$/i.test(l));
+          let itemLines = [];
+          if (idxItem !== -1) {
+            for (let i = idxItem + 1; i < lines.length; i++) {
+              const L = lines[i];
+              if (/^(Total:|---|Endereço:|Entrega:|Pagamento:)/i.test(L)) break;
+              if (!L) continue;
+              itemLines.push(L);
+            }
+          }
+
+          // Se não tiver "Item:" tenta capturar linhas numeradas como itens
+          if (itemLines.length === 0) {
+            itemLines = lines.filter((l) => /^\d+\./.test(l));
+          }
+
+          // parse address / CEP / número / complemento
+          const enderecoRaw = getLineValue("Endereço") || "";
+          const cepMatch =
+            enderecoRaw.match(/CEP[:\s]*([0-9]{8})/i) ||
+            raw.match(/CEP[:\s]*([0-9]{8})/i);
+          const cepDigits = cepMatch
+            ? String(cepMatch[1]).replace(/\D/g, "")
+            : "";
+          const numeroMatch = enderecoRaw.match(
+            /N(?:º|o)\s*[:\.]?\s*([^,\n]+)/i
+          );
+          const numero = numeroMatch ? numeroMatch[1].trim() : "";
+          const complMatch = enderecoRaw.match(/Compl\.?[:\.]?\s*([^,\n]+)/i);
+          const complemento = complMatch ? complMatch[1].trim() : "";
+
+          // tentar buscar via CEP
+          let cepInfo = null;
+          if (cepDigits && cepDigits.length === 8) {
+            cepInfo = await lookupCepRaw(cepDigits).catch(() => null);
+          }
+
+          const entrega = getLineValue("Entrega") || "";
+          const pagamento =
+            getLineValue("Pagamento") || getLineValue("Pagamento") || "";
+
+          // parse cada linha de item
+          const parsedItems = [];
+          for (const rawLine of itemLines) {
+            // remover prefixo numerado ("1.") e preços entre parenteses
+            let ln = rawLine
+              .replace(/^\d+\.?\s*/, "")
+              .replace(/\(.*?\)/g, "")
+              .trim();
+            if (!ln) continue;
+
+            // usar parseQuantityAndItem para extrair qty e itemText
+            const p = parseQuantityAndItem(ln);
+            const qty = Number(p.qty || 1);
+            const itemText = (p.itemText || ln).trim();
+
+            // tentar extrair preco se houver (ex: R$ 20,00) na linha original
+            let price = null;
+            const priceMatch = rawLine.match(/R\$\s*([0-9.,]+)/i);
+            if (priceMatch) {
+              const num = priceMatch[1].replace(/\./g, "").replace(/,/g, ".");
+              const nVal = Number(num);
+              if (!Number.isNaN(nVal)) price = nVal;
+            }
+
+            parsedItems.push({ quantity: qty, name: itemText, price });
+          }
+
+          if (parsedItems.length === 0) {
+            await client.sendMessage(
+              msg.from,
+              "Não foi possível identificar itens no orçamento importado. Verifique o formato."
+            );
+            return;
+          }
+
+          // construir payload compatível com postPedidoAPI
+          const payload = parsedItems.map((it) => ({
+            cep: cepDigits || "",
+            numero: numero || "",
+            complemento: complemento || "",
+            bairro: (cepInfo && cepInfo.bairro) || "",
+            logradouro: (cepInfo && cepInfo.logradouro) || "",
+            cidade: (cepInfo && cepInfo.localidade) || "",
+            nome: clienteNome,
+            produto: it.name,
+            metodo_pagamento: pagamento || "",
+            preco: it.price != null ? it.price : 0,
+            quantidade: Number(it.quantity || 1),
+          }));
+
+          // enviar relatório pro grupo confirmado (opcional)
+          const reportLines = [
+            "🧾 Orçamento importado (vendedor)",
+            `De: ${senderNormalized || msg.from}`,
+            `Nome: ${clienteNome}`,
+            "Itens:",
+            ...parsedItems.map(
+              (it, i) =>
+                `${i + 1}. ${it.quantity} x ${it.name} (R$ ${
+                  it.price != null ? it.price.toFixed(2) : "0,00"
+                })`
+            ),
+            "---",
+            `Endereço: ${enderecoRaw || "(não informado)"}`,
+            `Entrega: ${entrega || "(não informado)"}`,
+            `Pagamento: ${pagamento || "(não informado)"}`,
+          ];
+
+          const report = reportLines.join("\n");
+
+          if (CONFIRMED_GROUP_ID) {
+            try {
+              await client.sendMessage(CONFIRMED_GROUP_ID, report);
+            } catch (e) {
+              smallLog(
+                "Falha ao enviar relatório para grupo confirmado:",
+                e && e.message ? e.message : e
+              );
+            }
+          }
+
+          // postar para API
+          try {
+            if (payload.length === 0) {
+              smallLog("Payload vazio — nada a enviar para API.");
+              await client.sendMessage(
+                msg.from,
+                "Nenhum item válido para registrar."
+              );
+            } else {
+              const resp = await postPedidoAPI(payload);
+              smallLog("POST /pedido OK (importado):", resp.status);
+              if (CONFIRMED_GROUP_ID) {
+                try {
+                  await client.sendMessage(
+                    CONFIRMED_GROUP_ID,
+                    `✅ ${payload.length} pedido(s) gravado(s) no banco (importado).`
+                  );
+                } catch (e) {}
+              }
+              await client.sendMessage(
+                msg.from,
+                `Orçamento importado com sucesso — ${payload.length} pedido(s) enviados.`
+              );
+            }
+          } catch (errApi) {
+            smallLog(
+              "Erro ao enviar pedidos importados para API:",
+              errApi && errApi.message ? errApi.message : errApi
+            );
+            if (CONFIRMED_GROUP_ID) {
+              try {
+                await client.sendMessage(
+                  CONFIRMED_GROUP_ID,
+                  `⚠️ Falha ao gravar pedido(s) importado(s): ${String(
+                    errApi && errApi.message ? errApi.message : errApi
+                  )}`
+                );
+              } catch (e) {}
+            }
+            await client.sendMessage(
+              msg.from,
+              "Erro ao gravar pedidos importados. Verifique o log."
+            );
+          }
+        } catch (err) {
+          smallLog(
+            "Erro ao processar Orçamento importado:",
+            err && err.message ? err.message : err
+          );
+          try {
+            await client.sendMessage(
+              msg.from,
+              "Erro interno ao processar orçamento importado. Veja logs."
+            );
+          } catch (_) {}
+        }
+
+        return; // importante: evita que o fluxo continue
+      }
+      // === fim do bloco ===
+
       if (estado.etapa === "inicio") {
         if (!dentroHorario()) {
           await msg.reply(
@@ -933,13 +1148,13 @@ function createClient(puppeteerOptions) {
       if (estado.etapa === "pedido_item_more") {
         const opt = (msg.body || "").trim().toLowerCase();
 
-        if (opt === "1" || /^1\b/.test(opt)) {
+        if (opt === "1") {
           estado.etapa = "pedido_item";
           await client.sendMessage(from, "Digite o próximo item:");
           return;
         }
 
-        if (opt === "3" || /^3\b/.test(opt)) {
+        if (opt === "3") {
           if (
             !Array.isArray(estado.dados.items) ||
             estado.dados.items.length === 0
@@ -956,7 +1171,7 @@ function createClient(puppeteerOptions) {
           return;
         }
 
-        if (opt === "2" || /^2\b/.test(opt)) {
+        if (opt === "2") {
           if (
             !Array.isArray(estado.dados.items) ||
             estado.dados.items.length === 0

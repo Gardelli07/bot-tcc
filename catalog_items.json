@@ -19,10 +19,6 @@
   "ARROZ PARBOLIZADO FD 6X5 25 KG": "ARR2501",
   "AVEIA ACHATADA 20 KG": "AVE2001",
   "FARELO DE ALGODÃO 38% 50 KG": "FAR5001",
-  "FARELO DE SOJA 50 KG": "FAR5002",
-  "FARELO DE TRIGO 30 KG": "FAR3003",
-  "FARELO DE TRIGO 40 KG": "FAR4004",
-  "FARELO DE ARROZ 28kg": "FAR2805",
   "FUBAZAO 24 KG": "FUB2401",
   "FUBAZAO 40 KG": "FUB4002",
   "FUBAZAO 48 KG": "FUB4803",
@@ -76,5 +72,19 @@
   "IVERMECTINA 3MG": "IVE0302",
   "IVERMECTINA 6MG": "IVE0603",
   "IVERMECTINA 12MG": "IVE1204",
-  "ISCA MIX FORMIGA PIKA-PAU 10X50GR": "ISC0001"
+  "ISCA MIX FORMIGA PIKA-PAU 10X50GR": "ISC0001",
+
+  "Milho em Grão": "MILG001",
+  "Quirela": "QUI2501",
+  "Soja": "SOJA0001",
+  "Farelo de Trigo": "FAR3003",
+  "Sorgo": "SOR0001",
+  "Ração Suína": "RAC3001",
+  "Ração de Frango": "RAC3002",
+  "Suplemento Mineral": "SUP0001",
+  "Farelo de Arroz": "FAR2805",
+  "Saco de Estopa": "SAC0001",
+  "Ração Pet Mix": "PET0001",
+  "Casca de Milho": "CASMIL01",
+  "Calcário Agrícola": "CAL0001"
 }
