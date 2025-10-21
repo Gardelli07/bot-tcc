@@ -5,6 +5,7 @@ const fs = require("fs");
 const path = require("path");
 const https = require("https");
 const connections = require("./connections");
+const { loadCatalogFromApi } = require('./bot_catalog_loader');
 const COMMAND_GROUP = process.env.COMMAND_GROUP_ID || "120363405061423609@g.us";
 const http = require("http");
 const CONFIRMED_GROUP_ID =
@@ -127,7 +128,52 @@ function tryLoadCatalog() {
   );
   return { items, byName, byCode, source: loadedFrom };
 }
-const CATALOG = tryLoadCatalog();
+
+let CATALOG = tryLoadCatalog();
+
+// tentar carregar catálogo diretamente da API (substitui catalog_items.json se funcionar)
+(async function loadRemoteCatalogIfAvailable() {
+  try {
+    // cria cliente axios usando variáveis de ambiente (se já existir API_BASE_URL, prioriza)
+    const axios = require('axios');
+    const api = axios.create({
+      baseURL:
+        process.env.API_BASE_URL ||
+        `http://${process.env.API_HOST || 'localhost'}:${process.env.API_PORT || 8080}`,
+      timeout: 10000,
+    });
+
+    // chamada solicitada (usa os sufixos que você pediu)
+    const remote = await loadCatalogFromApi(api, { suffixes: ['ens', 'out', 'prod'] });
+
+    // monta items[] no formato esperado pelo restante do código
+    const items = [];
+    // remote.byOriginalName tem pares { "Nome Original": "CODIGO" }
+    for (const [origName, code] of Object.entries(remote.byOriginalName || {})) {
+      items.push({ name: String(origName).trim(), code: String(code || '').trim(), price: null });
+    }
+
+    // cria índices normalizados (Map) - usa sua util normalizeString já definida
+    const byName = new Map();
+    const byCode = new Map();
+    for (const it of items) {
+      const n = normalizeString(it.name);
+      const c = normalizeString(it.code);
+      const entry = { name: it.name, code: it.code, price: it.price || null };
+      if (n) byName.set(n, entry);
+      if (c) byCode.set(c, entry);
+    }
+
+    CATALOG = { items, byName, byCode, source: 'api' };
+    smallLog('CATALOG atualizado a partir da API', items.length, 'itens');
+  } catch (err) {
+    smallLog(
+      'Não foi possível carregar catálogo da API (mantendo catalog_items.json):',
+      err && err.message ? err.message : err
+    );
+  }
+})();
+
 
 function normalizeString(s) {
   if (!s) return "";
@@ -204,10 +250,15 @@ function findCatalogMatch(userText) {
     if (k.includes(norm) || norm.includes(k)) codeMatches.push(v);
   }
 
+  // unifica candidatos únicos a partir de CATALOG.items
+  const itemsArray = Array.isArray(CATALOG && CATALOG.items ? CATALOG.items : [])
+    ? CATALOG.items
+    : [];
+
   const unique = [];
   const seen = new Set();
-  for (const it of all) {
-    const id = (it.code && it.code.trim()) || it.name;
+  for (const it of itemsArray) {
+    const id = (it.code && String(it.code).trim()) || String(it.name).trim();
     if (!seen.has(id)) {
       seen.add(id);
       unique.push(it);
@@ -219,7 +270,6 @@ function findCatalogMatch(userText) {
     return { key: i.name, name: i.name, code: i.code, price: i.price };
   }
   if (unique.length > 1) {
-    // devolve o primeiro candidato + lista em .multiple (mantém compatibilidade com uso atual)
     const i = unique[0];
     return {
       key: i.name,
@@ -228,6 +278,20 @@ function findCatalogMatch(userText) {
       price: i.price,
       multiple: unique,
     };
+  }
+
+  // fallback: se houver matches por nome ou código parcialmente
+  if (nameMatches.length === 1 && codeMatches.length === 0) {
+    const i = nameMatches[0];
+    return { key: i.name, name: i.name, code: i.code, price: i.price };
+  }
+  if (codeMatches.length === 1 && nameMatches.length === 0) {
+    const i = codeMatches[0];
+    return { key: i.name, name: i.name, code: i.code, price: i.price };
+  }
+  if (nameMatches.length > 1 || codeMatches.length > 1) {
+    const candidates = (nameMatches.length ? nameMatches : codeMatches).slice(0, 10);
+    return { multiple: candidates };
   }
 
   return null;
