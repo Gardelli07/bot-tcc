@@ -5,155 +5,39 @@ const fs = require("fs");
 const path = require("path");
 const https = require("https");
 const connections = require("./connections");
-const { loadCatalogFromApi } = require('./bot_catalog_loader');
+const { loadCatalogFromApi } = require("./bot_catalog_loader");
 const COMMAND_GROUP = process.env.COMMAND_GROUP_ID || "120363405061423609@g.us";
 const http = require("http");
 const CONFIRMED_GROUP_ID =
   process.env.CONFIRMED_GROUP_ID || process.env.PEDIDOS_CONFIRMADOS_ID || null;
 const DUVIDAS_GROUP_ID = process.env.DUVIDAS_GROUP_ID || null;
 
-// CATALOGO (catalog_items.json) — carga e utilidades
-function tryLoadCatalog() {
-  const candidates = [
-    path.join(__dirname, "catalog_items.json"),
-    path.join(process.cwd(), "catalog_items.json"),
-    path.join(__dirname, "catalog", "catalog_items.json"),
-    path.join(process.cwd(), "catalog", "catalog_items.json"),
-    path.join("/mnt/data", "catalog_items.json"),
-  ];
-  let rawObj = null;
-  let loadedFrom = null;
+let CATALOG = { items: [], byName: new Map(), byCode: new Map(), source: null };
 
-  for (const p of candidates) {
-    if (fs.existsSync(p)) {
-      const raw = fs.readFileSync(p, "utf8");
-      rawObj = JSON.parse(raw);
-      loadedFrom = p;
-      break;
-    }
-  }
-
-  // Normalizar para um array de itens: { name, code, price }
-  const items = [];
-  try {
-    if (Array.isArray(rawObj)) {
-      // formato: [{ name, code, price, ... }, ...]
-      for (const it of rawObj) {
-        const name = String(it.name || it.nome || it.label || "").trim();
-        const code = String(it.code || it.codigo || it.cod || "").trim();
-        const price = "price" in it ? it.price : it.preco || it.valor || null;
-        if (name || code)
-          items.push({ name: name || code, code: code || "", price: price });
-      }
-    } else if (rawObj && typeof rawObj === "object") {
-      const vals = Object.values(rawObj);
-      if (
-        vals.length > 0 &&
-        (typeof vals[0] !== "object" || vals[0] === null)
-      ) {
-        // escolher uma amostra não-nula para inferir tipo
-        const sample = vals.find((v) => v !== null && v !== undefined);
-        if (typeof sample === "number") {
-          // mapeamento name -> price
-          for (const [k, v] of Object.entries(rawObj)) {
-            items.push({ name: String(k).trim(), code: "", price: v });
-          }
-        } else if (typeof sample === "string") {
-          // mapeamento name -> code (ex: "MILHO 48 KG": "MIL4801")
-          for (const [k, v] of Object.entries(rawObj)) {
-            items.push({
-              name: String(k).trim(),
-              code: String(v).trim(),
-              price: null,
-            });
-          }
-        } else {
-          // fallback seguro: tratar como name -> rawValue
-          for (const [k, v] of Object.entries(rawObj)) {
-            items.push({ name: String(k).trim(), code: "", price: v });
-          }
-        }
-      } else {
-        // entradas como: { "COD123": { name: "MILHO 24 KG", code: "COD123", price: 47 }, ... }
-        for (const [k, v] of Object.entries(rawObj)) {
-          if (v && typeof v === "object") {
-            const name =
-              String(v.name || v.nome || v.label || "").trim() ||
-              String(k).trim();
-            const code = String(v.code || v.codigo || v.cod || k).trim();
-            const price = "price" in v ? v.price : v.preco || v.valor || null;
-            items.push({ name, code, price });
-          } else {
-            // fallback seguro
-            items.push({ name: String(k).trim(), code: "", price: v });
-          }
-        }
-      }
-    }
-  } catch (e) {
-    smallLog(
-      "Erro ao normalizar catalog_items.json:",
-      e && e.message ? e.message : e
-    );
-  }
-
-  // índices normalizados (chaves em UPPER + sem acento)
-  function keyStr(s) {
-    return normalizeString(String(s || ""));
-  }
-
-  const byName = new Map(); // key = normalized name => item
-  const byCode = new Map(); // key = normalized code => item
-  for (const it of items) {
-    const n = keyStr(it.name);
-    const c = keyStr(it.code);
-    const entry = {
-      name: it.name,
-      code: it.code || null,
-      price: it.price !== undefined ? it.price : null,
-    };
-    if (n) byName.set(n, entry);
-    if (c) byCode.set(c, entry);
-  }
-
-  smallLog(
-    "catalog_items.json carregado de",
-    loadedFrom,
-    "items(normalizados):",
-    items.length,
-    "byName:",
-    byName.size,
-    "byCode:",
-    byCode.size
-  );
-  return { items, byName, byCode, source: loadedFrom };
-}
-
-let CATALOG = tryLoadCatalog();
-
-// tentar carregar catálogo diretamente da API (substitui catalog_items.json se funcionar)
 (async function loadRemoteCatalogIfAvailable() {
   try {
-    // cria cliente axios usando variáveis de ambiente (se já existir API_BASE_URL, prioriza)
-    const axios = require('axios');
+    const axios = require("axios");
     const api = axios.create({
       baseURL:
         process.env.API_BASE_URL ||
-        `http://${process.env.API_HOST || 'localhost'}:${process.env.API_PORT || 8080}`,
+        `http://${process.env.API_HOST || "localhost"}:${
+          process.env.API_PORT || 8080
+        }`,
       timeout: 10000,
     });
-
-    // chamada solicitada (usa os sufixos que você pediu)
-    const remote = await loadCatalogFromApi(api, { suffixes: ['ens', 'out', 'prod'] });
-
-    // monta items[] no formato esperado pelo restante do código
+    const remote = await loadCatalogFromApi(api, {
+      suffixes: ["ens", "out", "prod"],
+    });
     const items = [];
-    // remote.byOriginalName tem pares { "Nome Original": "CODIGO" }
-    for (const [origName, code] of Object.entries(remote.byOriginalName || {})) {
-      items.push({ name: String(origName).trim(), code: String(code || '').trim(), price: null });
+    for (const [origName, code] of Object.entries(
+      remote.byOriginalName || {}
+    )) {
+      items.push({
+        name: String(origName).trim(),
+        code: String(code || "").trim(),
+        price: null,
+      });
     }
-
-    // cria índices normalizados (Map) - usa sua util normalizeString já definida
     const byName = new Map();
     const byCode = new Map();
     for (const it of items) {
@@ -163,17 +47,15 @@ let CATALOG = tryLoadCatalog();
       if (n) byName.set(n, entry);
       if (c) byCode.set(c, entry);
     }
-
-    CATALOG = { items, byName, byCode, source: 'api' };
-    smallLog('CATALOG atualizado a partir da API', items.length, 'itens');
+    CATALOG = { items, byName, byCode, source: "api" };
+    smallLog("CATALOG atualizado a partir da API", items.length, "itens");
   } catch (err) {
     smallLog(
-      'Não foi possível carregar catálogo da API (mantendo catalog_items.json):',
+      "Não foi possível carregar catálogo da API (mantendo catalog_items.json):",
       err && err.message ? err.message : err
     );
   }
 })();
-
 
 function normalizeString(s) {
   if (!s) return "";
@@ -186,6 +68,15 @@ function normalizeString(s) {
 function postPedidoAPI(data) {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify(data);
+
+    // DEBUG: log do payload que será enviado para /pedido
+    try {
+      smallLog && smallLog("POST /pedido payload:", JSON.parse(payload));
+    } catch (e) {
+      // fallback
+      console.log("POST /pedido payload (raw):", payload);
+    }
+
     const hostname = process.env.API_HOST || "localhost";
     const port = process.env.API_PORT ? Number(process.env.API_PORT) : 8080;
 
@@ -251,7 +142,9 @@ function findCatalogMatch(userText) {
   }
 
   // unifica candidatos únicos a partir de CATALOG.items
-  const itemsArray = Array.isArray(CATALOG && CATALOG.items ? CATALOG.items : [])
+  const itemsArray = Array.isArray(
+    CATALOG && CATALOG.items ? CATALOG.items : []
+  )
     ? CATALOG.items
     : [];
 
@@ -290,7 +183,10 @@ function findCatalogMatch(userText) {
     return { key: i.name, name: i.name, code: i.code, price: i.price };
   }
   if (nameMatches.length > 1 || codeMatches.length > 1) {
-    const candidates = (nameMatches.length ? nameMatches : codeMatches).slice(0, 10);
+    const candidates = (nameMatches.length ? nameMatches : codeMatches).slice(
+      0,
+      10
+    );
     return { multiple: candidates };
   }
 
@@ -327,7 +223,6 @@ function smallLog(...args) {
   console.log(...args);
 }
 
-// UTIL: ViaCEP lookup
 function lookupCepRaw(cep) {
   return new Promise((resolve) => {
     const clean = (cep || "").replace(/\D/g, "").slice(0, 8);
@@ -404,9 +299,8 @@ function resolveCatalogFiles() {
   return Array.from(new Set(found));
 }
 
-const inHandoff = new Set(); // chats que estão em handoff
+const inHandoff = new Set();
 
-// normaliza entrada para '5515991234567@c.us'
 function normalizeId(input) {
   if (!input) return null;
   input = String(input).trim();
@@ -462,11 +356,8 @@ function createClient(puppeteerOptions) {
       return true;
     }
   }
-
-  // catálogo
   const catalogFiles = resolveCatalogFiles();
 
-  // envia menu primário (forçado)
   async function sendPrimaryMenu(to) {
     if (!userState[to]) userState[to] = { etapa: "inicio", dados: {} };
     userState[to].etapa = "menu_principal";
@@ -497,13 +388,9 @@ function createClient(puppeteerOptions) {
       const media = MessageMedia.fromFilePath(filePath);
       try {
         await client.sendMessage(to, media, { caption: "" });
-      } catch {
-        // ignora erros
-      }
-
+      } catch {}
       await new Promise((resolve) => setTimeout(resolve, 400));
     }
-
     await client.sendMessage(
       to,
       "✅ Enviamos o catálogo completo. Deseja fazer um orçamento? \nResponda com *2* para iniciar o orçamento."
@@ -585,8 +472,8 @@ function createClient(puppeteerOptions) {
   function buildOrderReportForGroup(dados, from) {
     const d = dados || {};
     const fromNumber = String(from || "desconhecido")
-      .replace(/@c\.us$/i, "") // remove sufixo @c.us se existir
-      .replace(/\D/g, ""); // deixa só dígitos
+      .replace(/@c\.us$/i, "")
+      .replace(/\D/g, "");
     const lines = [
       "🧾 *Novo Orçamento Confirmado*",
       `De: ${fromNumber || "desconhecido"}`,
@@ -627,11 +514,11 @@ function createClient(puppeteerOptions) {
 
     if (isFromCommandGroup) {
       const author = msg.author || "desconhecido";
-      const authorShort = String(author).replace(/@c\.us$/i, ""); // já remove o @c.us, mantém o número
+      const authorShort = String(author).replace(/@c\.us$/i, "");
 
       const targetShort = String(target)
         .replace(/@c\.us$/i, "")
-        .replace(/\D/g, ""); // deixa só números
+        .replace(/\D/g, "");
 
       await client.sendMessage(
         replyTo,
@@ -690,16 +577,10 @@ function createClient(puppeteerOptions) {
       );
     }
 
-    // confirmação para quem emitiu o comando (grupo ou autor)
     if (isFromCommandGroup) {
-      const author = msg.author || "desconhecido";
-      const authorShort = String(author)
-        .replace(/@c\.us$/i, "")
-        .replace(/\D/g, ""); // deixa só números
-
       const targetShort = String(target)
         .replace(/@c\.us$/i, "")
-        .replace(/\D/g, ""); // deixa só números
+        .replace(/\D/g, "");
 
       await client.sendMessage(
         replyTo,
@@ -718,12 +599,11 @@ function createClient(puppeteerOptions) {
 
   client.on("message", async (msg) => {
     try {
-      const from = msg.from; // chat id (user or staff)
+      const from = msg.from;
       const textRaw = (msg.body || "").trim();
       const text = textRaw.toLowerCase();
-      const isFromCommandGroup = msg.from === COMMAND_GROUP; // Determina se a mensagem veio do grupo de comandos
-      const chatId = msg.fromMe && msg.to ? msg.to : msg.from; // determina o chat 'efetivo' (para comandos podemos permitir grupo)
-
+      const isFromCommandGroup = msg.from === COMMAND_GROUP;
+      const chatId = msg.fromMe && msg.to ? msg.to : msg.from;
       if (!isFromCommandGroup && chatId && inHandoff.has(chatId)) {
         return;
       }
@@ -772,7 +652,7 @@ function createClient(puppeteerOptions) {
         await sendPrimaryMenu(from);
         return;
       }
-      // se o usuário digitar "menu" em qualquer momento: reset e forçar menu primário
+
       if (text === "menu") {
         userState[from] = { etapa: "inicio", dados: {} };
         await client.sendMessage(from, "Voltando ao menu inicial...");
@@ -780,7 +660,8 @@ function createClient(puppeteerOptions) {
         return;
       }
 
-      // === Bloco a ser inserido ===
+      // === Bloco vendedor ===
+
       if (
         textRaw &&
         textRaw.toLowerCase().startsWith("novo orçamento, vendedor")
@@ -793,7 +674,6 @@ function createClient(puppeteerOptions) {
           const raw = textRaw.replace(/\r/g, "");
           const lines = raw.split("\n").map((l) => l.trim());
 
-          // helpers
           const getLineValue = (label) => {
             const re = new RegExp("^" + label + ":\\s*(.+)$", "i");
             const found = lines.find((l) => re.test(l));
@@ -811,7 +691,6 @@ function createClient(puppeteerOptions) {
               .replace(/\D/g, "") ||
             "Desconhecido";
 
-          // pegar bloco de itens: encontra o índice da linha "Item:" e pega até Total: or --- or Endereço:
           const idxItem = lines.findIndex((l) => /^Item:?$/i.test(l));
           let itemLines = [];
           if (idxItem !== -1) {
@@ -823,12 +702,10 @@ function createClient(puppeteerOptions) {
             }
           }
 
-          // Se não tiver "Item:" tenta capturar linhas numeradas como itens
           if (itemLines.length === 0) {
             itemLines = lines.filter((l) => /^\d+\./.test(l));
           }
 
-          // parse address / CEP / número / complemento
           const enderecoRaw = getLineValue("Endereço") || "";
           const cepMatch =
             enderecoRaw.match(/CEP[:\s]*([0-9]{8})/i) ||
@@ -843,7 +720,6 @@ function createClient(puppeteerOptions) {
           const complMatch = enderecoRaw.match(/Compl\.?[:\.]?\s*([^,\n]+)/i);
           const complemento = complMatch ? complMatch[1].trim() : "";
 
-          // tentar buscar via CEP
           let cepInfo = null;
           if (cepDigits && cepDigits.length === 8) {
             cepInfo = await lookupCepRaw(cepDigits).catch(() => null);
@@ -853,22 +729,18 @@ function createClient(puppeteerOptions) {
           const pagamento =
             getLineValue("Pagamento") || getLineValue("Pagamento") || "";
 
-          // parse cada linha de item
           const parsedItems = [];
           for (const rawLine of itemLines) {
-            // remover prefixo numerado ("1.") e preços entre parenteses
             let ln = rawLine
               .replace(/^\d+\.?\s*/, "")
               .replace(/\(.*?\)/g, "")
               .trim();
             if (!ln) continue;
 
-            // usar parseQuantityAndItem para extrair qty e itemText
             const p = parseQuantityAndItem(ln);
             const qty = Number(p.qty || 1);
             const itemText = (p.itemText || ln).trim();
 
-            // tentar extrair preco se houver (ex: R$ 20,00) na linha original
             let price = null;
             const priceMatch = rawLine.match(/R\$\s*([0-9.,]+)/i);
             if (priceMatch) {
@@ -888,22 +760,29 @@ function createClient(puppeteerOptions) {
             return;
           }
 
-          // construir payload compatível com postPedidoAPI
+          const safeCep = cepDigits && String(cepDigits).replace(/\D/g, "");
           const payload = parsedItems.map((it) => ({
-            cep: cepDigits || "",
-            numero: numero || "",
-            complemento: complemento || "",
-            bairro: (cepInfo && cepInfo.bairro) || "",
-            logradouro: (cepInfo && cepInfo.logradouro) || "",
-            cidade: (cepInfo && cepInfo.localidade) || "",
-            nome: clienteNome,
+            cep: safeCep && safeCep.length === 8 ? safeCep : null,
+            numero:
+              numero && String(numero).trim() !== ""
+                ? String(numero).trim()
+                : null,
+            complemento:
+              complemento && String(complemento).trim() !== ""
+                ? String(complemento).trim()
+                : null,
+            bairro: cepInfo && cepInfo.bairro ? cepInfo.bairro : null,
+            logradouro:
+              cepInfo && cepInfo.logradouro ? cepInfo.logradouro : null,
+            cidade: cepInfo && cepInfo.localidade ? cepInfo.localidade : null,
+            nome: clienteNome || null,
             produto: it.name,
-            metodo_pagamento: pagamento || "",
-            preco: it.price != null ? it.price : 0,
+            metodo_pagamento:
+              pagamento && pagamento.trim() !== "" ? pagamento.trim() : null,
+            preco: it.price != null ? Number(it.price) : 0,
             quantidade: Number(it.quantity || 1),
           }));
 
-          // enviar relatório pro grupo confirmado (opcional)
           const reportLines = [
             "🧾 Orçamento importado (vendedor)",
             `De: ${senderNormalized || msg.from}`,
@@ -934,7 +813,6 @@ function createClient(puppeteerOptions) {
             }
           }
 
-          // postar para API
           try {
             if (payload.length === 0) {
               smallLog("Payload vazio — nada a enviar para API.");
@@ -991,9 +869,9 @@ function createClient(puppeteerOptions) {
           } catch (_) {}
         }
 
-        return; // importante: evita que o fluxo continue
+        return;
       }
-      // === fim do bloco ===
+      // === fim do bloco vendedor ===
 
       if (estado.etapa === "inicio") {
         if (!dentroHorario()) {
@@ -1055,7 +933,6 @@ function createClient(puppeteerOptions) {
         return;
       }
 
-      // === INÍCIO: fluxo de item multi-entrada com confirmação e edição antes da quantidade ===
       if (estado.etapa === "pedido_item") {
         const body = (msg.body || "").trim();
         estado.dados.itemRaw = body;
@@ -1446,25 +1323,48 @@ function createClient(puppeteerOptions) {
               estado.dados._lastCepAttempt_edit ||
               "";
 
+            const lastCepAttempt =
+              (cepInfo && cepInfo.cep) ||
+              estado.dados._lastCepAttempt ||
+              estado.dados._lastCepAttempt_edit ||
+              "";
+            const safeCepConfirm = lastCepAttempt
+              ? String(lastCepAttempt).replace(/\D/g, "")
+              : "";
+
             const payload = items.map((it) => {
+              const cidadeVal =
+                (cepInfo && cepInfo.localidade) || estado.dados.cidade || null;
               return {
-                cep: cepDigits
-                  ? cepDigits.replace(/\D/g, "")
-                  : String(estado.dados._lastCepAttempt || ""),
-                numero: estado.dados.numero || "",
-                complemento: estado.dados.complemento || "",
-                bairro: (cepInfo && cepInfo.bairro) || "",
-                logradouro: (cepInfo && cepInfo.logradouro) || "",
-                cidade:
-                  (cepInfo && cepInfo.localidade) || estado.dados.cidade || "",
+                cep:
+                  safeCepConfirm && safeCepConfirm.length === 8
+                    ? safeCepConfirm
+                    : null,
+                numero:
+                  estado.dados.numero &&
+                  String(estado.dados.numero).trim() !== ""
+                    ? String(estado.dados.numero).trim()
+                    : null,
+                complemento:
+                  estado.dados.complemento &&
+                  String(estado.dados.complemento).trim() !== ""
+                    ? String(estado.dados.complemento).trim()
+                    : null,
+                bairro: (cepInfo && cepInfo.bairro) || null,
+                logradouro: (cepInfo && cepInfo.logradouro) || null,
+                cidade: cidadeVal,
                 nome: estado.dados.nome || from,
                 produto: it.name,
-                metodo_pagamento: estado.dados.pagamento || "",
+                metodo_pagamento:
+                  estado.dados.pagamento &&
+                  String(estado.dados.pagamento).trim() !== ""
+                    ? String(estado.dados.pagamento).trim()
+                    : null,
                 preco:
                   it.price != null
-                    ? it.price
+                    ? Number(it.price)
                     : estado.dados.preco != null
-                    ? estado.dados.preco
+                    ? Number(estado.dados.preco)
                     : 0,
                 quantidade: Number(it.quantity || 1),
               };
