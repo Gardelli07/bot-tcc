@@ -761,6 +761,7 @@ function createClient(puppeteerOptions) {
           }
 
           const safeCep = cepDigits && String(cepDigits).replace(/\D/g, "");
+
           const payload = parsedItems.map((it) => ({
             cep: safeCep && safeCep.length === 8 ? safeCep : null,
             numero:
@@ -781,6 +782,10 @@ function createClient(puppeteerOptions) {
               pagamento && pagamento.trim() !== "" ? pagamento.trim() : null,
             preco: it.price != null ? Number(it.price) : 0,
             quantidade: Number(it.quantity || 1),
+
+            // marca explícita de origem + campo de status (para o servidor consumir)
+            origem: "vendedor",
+            Status_pedprod: "Em analise",
           }));
 
           const reportLines = [

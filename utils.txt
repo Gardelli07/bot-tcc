@@ -3,7 +3,6 @@ rd /s /q .wwebjs_cache
 npm init -y
 npm install whatsapp-web.js qrcode-terminal moment-timezone dotenv
 
-null ao enviar para o banco sem complemento 
 após "encerrar" enviar via site
 
 
