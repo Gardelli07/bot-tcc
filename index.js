@@ -115,6 +115,63 @@ function postPedidoAPI(data) {
   });
 }
 
+async function ensureClientExists({
+  nome,
+  telefone,
+  cep,
+  numero,
+  complemento,
+  email,
+}) {
+  try {
+    const hostname = process.env.API_HOST || "localhost";
+    const port = process.env.API_PORT ? Number(process.env.API_PORT) : 8080;
+    const url = `http://${hostname}:${port}/cadastro`;
+
+    const payload = {
+      nome: nome || "Sem Nome",
+      telefone: telefone || null,
+      cep: cep || null,
+      numero: numero || null,
+      complemento: complemento || null,
+      // força explicitamente null quando não houver
+      email: email && String(email).trim() !== "" ? String(email).trim() : null,
+      senha: null,
+    };
+
+    // Remove propriedades estritamente undefined para limpeza (mas deixa explicit null)
+    Object.keys(payload).forEach((k) => {
+      if (payload[k] === undefined) delete payload[k];
+    });
+
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      // se sua runtime não suporta 'timeout' em fetch, remova ou use AbortController
+    });
+
+    if (resp.ok) {
+      try {
+        const body = await resp.json().catch(() => ({}));
+        smallLog && smallLog("ensureClientExists:", resp.status, body);
+      } catch (_) {}
+      return true;
+    } else {
+      const text = await resp.text().catch(() => "");
+      smallLog && smallLog("Falha ensureClientExists:", resp.status, text);
+      return false;
+    }
+  } catch (err) {
+    smallLog &&
+      smallLog(
+        "Erro ensureClientExists:",
+        err && err.message ? err.message : err
+      );
+    return false;
+  }
+}
+
 function findCatalogMatch(userText) {
   if (!userText) return null;
   const norm = normalizeString(userText);
@@ -826,6 +883,33 @@ function createClient(puppeteerOptions) {
                 "Nenhum item válido para registrar."
               );
             } else {
+              // --- garantir cliente mínimo antes de enviar pedidos importados ---
+              try {
+                const senderPhone =
+                  senderNormalized &&
+                  String(senderNormalized)
+                    .replace(/@c\.us$/i, "")
+                    .trim();
+                const clienteNomeSafe =
+                  clienteNome || senderPhone || "Cliente Vendedor";
+
+                await ensureClientExists({
+                  nome: clienteNomeSafe,
+                  telefone: senderPhone || null,
+                  cep: safeCep && safeCep.length === 8 ? safeCep : null,
+                  numero: numero || null,
+                  complemento: complemento || null,
+                  email: null,
+                });
+              } catch (e) {
+                smallLog &&
+                  smallLog(
+                    "ensureClientExists (vendedor) erro não-fatal:",
+                    e && e.message ? e.message : e
+                  );
+              }
+              // --- fim garantia cliente ---
+
               const resp = await postPedidoAPI(payload);
               smallLog("POST /pedido OK (importado):", resp.status);
               if (CONFIRMED_GROUP_ID) {
@@ -1297,6 +1381,8 @@ function createClient(puppeteerOptions) {
         return;
       }
 
+      // === Bloco pedido_confirm ===
+
       if (estado.etapa === "pedido_confirm") {
         if (text === "1") {
           await client.sendMessage(
@@ -1378,6 +1464,36 @@ function createClient(puppeteerOptions) {
             if (payload.length === 0) {
               smallLog("Nenhum item encontrado para enviar à rota /pedido");
             } else {
+              // --- garantir cliente mínimo antes de enviar pedidos de confirmação ---
+              try {
+                const fromPhone = from
+                  ? String(from)
+                      .replace(/@c\.us$/i, "")
+                      .trim()
+                  : null;
+                const nomeDoPedido =
+                  estado.dados.nome || fromPhone || "Cliente";
+
+                await ensureClientExists({
+                  nome: nomeDoPedido,
+                  telefone: fromPhone || null,
+                  cep:
+                    safeCepConfirm && safeCepConfirm.length === 8
+                      ? safeCepConfirm
+                      : null,
+                  numero: estado.dados.numero || null,
+                  complemento: estado.dados.complemento || null,
+                  email: null,
+                });
+              } catch (e) {
+                smallLog &&
+                  smallLog(
+                    "ensureClientExists (pedido_confirm) erro não-fatal:",
+                    e && e.message ? e.message : e
+                  );
+              }
+              // --- fim garantia cliente ---
+
               try {
                 const resp = await postPedidoAPI(payload);
                 smallLog("POST /pedido OK:", resp.status);
