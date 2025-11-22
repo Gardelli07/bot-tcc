@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <title>Bot WhatsApp - RBS Cereais</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="page">
+      <div class="stage">
+        <!-- top and left stripes removed -->
+
+        <div class="logo-pill" aria-hidden="true">
+          <img src="assets/logo.png" alt="RBS logo" />
+        </div>
+
+        <div class="content-area">
+          <div class="panels">
+            <!-- LEFT: QR panel -->
+            <section class="panel">
+              <h4>Aguardando QR / logs...</h4>
+              <div class="qr-area">
+                <div class="qr-frame">
+                  <img id="qr" src="" alt="QR Code" />
+                </div>
+                <div class="hint">Escaneie com o app WhatsApp</div>
+
+                <div class="controls">
+                  <button id="btnStart" class="btn">Iniciar Bot</button>
+                  <button id="btnStop" class="btn outline">Parar Bot</button>
+                </div>
+              </div>
+            </section>
+
+            <!-- RIGHT: Terminal -->
+            <section class="panel terminal">
+              <div class="title">Terminal</div>
+              <div id="terminalBox" class="box"></div>
+            </section>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>
