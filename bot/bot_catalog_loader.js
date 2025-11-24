@@ -20,20 +20,35 @@ function findCodigoInObject(obj, seen = new Set()) {
   if (seen.has(obj)) return null;
   seen.add(obj);
 
-  for (const k of Object.keys(obj)) {
-    if (/^codigo/i.test(k)) {
-      const v = obj[k];
-      if (v !== null && v !== undefined && String(v).trim() !== '') return String(v).trim();
+  const keys = Object.keys(obj);
+  // direct matches
+  for (const k of keys) {
+    if (/^(codigo|cod|code)$/i.test(k) && obj[k]) {
+      return String(obj[k]).trim();
+    }
+    if (/codigo/i.test(k) && obj[k]) {
+      return String(obj[k]).trim();
     }
   }
+  // check common patterns (e.g. "Codigo","CodigoProduto","CodigoProd")
+  for (const k of keys) {
+    if (/cod/i.test(k) && obj[k]) {
+      return String(obj[k]).trim();
+    }
+  }
+  // fallback: Id fields
+  for (const k of keys) {
+    if (/^id$/i.test(k) && obj[k]) return String(obj[k]).trim();
+    if (/^id_/i.test(k) && obj[k]) return String(obj[k]).trim();
+  }
 
-  // procura recursiva
-  for (const k of Object.keys(obj)) {
+  // recursive search in nested objects/arrays
+  for (const k of keys) {
     try {
       const v = obj[k];
       if (v && typeof v === 'object') {
-        const nested = findCodigoInObject(v, seen);
-        if (nested) return nested;
+        const found = findCodigoInObject(v, seen);
+        if (found) return found;
       }
     } catch (e) {
       // ignore
@@ -43,94 +58,67 @@ function findCodigoInObject(obj, seen = new Set()) {
 }
 
 /**
- * Carrega os registros das tabelas esperadas e retorna um objeto { NOME: CODIGO }
- * - api: instância axios (ou objeto com .get)
- * - options.suffixes: array de sufixos a procurar (ex: ['ens','out','produto']) — opcional
+ * Carrega registros de endpoints comuns e retorna { byNormalizedName, byOriginalName, items }
+ * - api: instância axios
+ * - options.endpoints: array de endpoints a consultar (padrão: ['/produtos','/ensacados','/cereais'])
  */
 async function loadCatalogFromApi(api, options = {}) {
-  const suffixes = options.suffixes || ['ens', 'out', 'produto', 'prod'];
+  const endpoints = options.endpoints || ['/produtos', '/ensacados', '/cereais'];
 
-  // ajuste os endpoints conforme seu backend (a sua página React usa /cereais e /produtos)
-  const [cereais, produtos] = await Promise.all([
-    safeGet(api, '/ensacados'),
-    safeGet(api, '/produtos'),
-  ]);
-
-  const all = [...cereais, ...produtos];
-  const map = {}; // resultado: NOME_NORMALIZADO -> CODIGO
-
-  for (const it of all) {
-    // tenta extrair nome por várias chaves comuns
-    const nomeRaw = it.Nome || it.Nome_ens || it.Nome_out || it.descricao || it.Nome_produto || it.nome || it.descricao_produto || '';
-    const nome = normalizeName(nomeRaw);
-    if (!nome) continue;
-
-    // tenta extrair códigos usando padrões previsíveis
-    let codigo = null;
-
-    // 1) chaves explícitas com sufixo conhecido: Codigo_<sufixo>
-    for (const s of suffixes) {
-      const key1 = `Codigo_${s}`;
-      const key2 = `Codigo${s ? '_' + s : ''}`; // só por segurança
-      if (it[key1]) {
-        codigo = String(it[key1]).trim();
-        break;
+  const all = [];
+  for (const ep of endpoints) {
+    try {
+      const arr = await safeGet(api, ep);
+      if (Array.isArray(arr) && arr.length > 0) {
+        // append items
+        for (const it of arr) all.push(it);
       }
-      if (it[key2]) {
-        codigo = String(it[key2]).trim();
+    } catch (e) {
+      // ignore individual endpoint errors
+    }
+  }
+
+  const byNormalizedName = {};
+  const byOriginalName = {};
+  const items = [];
+
+  for (const raw of all) {
+    if (!raw || typeof raw !== 'object') continue;
+
+    // try common name fields
+    const nameCandidates = ['Nome', 'nome', 'Name', 'name', 'Descricao', 'descricao', 'titulo', 'Titulo'];
+    let name = null;
+    for (const k of nameCandidates) {
+      if (raw[k]) {
+        name = String(raw[k]).trim();
         break;
       }
     }
-
-    // 2) chaves sem sufixo ou com variações (Codigo, codigo_produto, Codigo_prod)
-    if (!codigo) {
-      const candidates = ['Codigo', 'codigo', 'Codigo_produto', 'Codigo_prod', 'Codigo_outro', 'Codigo_out'];
-      for (const c of candidates) {
-        if (it[c]) {
-          codigo = String(it[c]).trim();
+    if (!name) {
+      // try any string field as name fallback
+      for (const k of Object.keys(raw)) {
+        if (typeof raw[k] === 'string' && raw[k].trim().length > 0) {
+          name = String(raw[k]).trim();
           break;
         }
       }
     }
+    if (!name) continue;
 
-    // 3) busca recursiva em objetos caso não exista chave direta
-    if (!codigo) {
-      codigo = findCodigoInObject(it);
-    }
+    const code = findCodigoInObject(raw) || '';
+    const normalized = normalizeName(name);
+    const item = { name, code: String(code || '').trim(), raw };
+    items.push(item);
 
-    // 4) fallback: se não tiver código, podemos usar o Id original como base
-    if (!codigo) {
-      const rawId = it.Id ?? it.Id_ens ?? it.Id_out ?? it.id ?? '';
-      if (rawId !== '') codigo = String(rawId);
-    }
-
-    // coloca no mapa; se já existir nome igual prefira códigos não-numéricos ou mais completos
-    if (map[nome]) {
-      // se já existe, tente não sobrescrever se o existente já tem um código válido
-      // preferir manter se existente for mais descritivo
-      if (!map[nome] && codigo) map[nome] = codigo;
-    } else {
-      map[nome] = codigo || '';
-    }
-  }
-
-  // retorno no formato parecido com seu JSON: chaves originais (não normalizadas) também podem ser úteis
-  // vamos gerar duas formas: mapNormalized (chave normalizada) e mapOriginalName (chave no formato original mais legível)
-  const mapOriginalName = {};
-  for (const it of all) {
-    const nomeRaw = it.Nome || it.Nome_ens || it.Nome_out || it.descricao || it.Nome_produto || it.nome || '';
-    const nome = normalizeName(nomeRaw);
-    if (!nome) continue;
-    const codigo = map[nome] || '';
-    mapOriginalName[String(nomeRaw).trim()] = codigo;
+    if (normalized) byNormalizedName[normalized] = item.code || '';
+    byOriginalName[name] = item.code || '';
   }
 
   return {
-    byNormalizedName: map,
-    byOriginalName: mapOriginalName,
+    byNormalizedName,
+    byOriginalName,
+    items,
   };
 }
 
-module.exports = {
-  loadCatalogFromApi,
-};
+export { loadCatalogFromApi };

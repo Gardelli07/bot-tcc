@@ -1,31 +1,34 @@
-require("dotenv").config();
-const { Client, LocalAuth, MessageMedia } = require("whatsapp-web.js");
-const qrcode = require("qrcode-terminal");
-const qrcodeLib = require("qrcode");
-const fs = require("fs");
-const path = require("path");
-const https = require("https");
-const connections = require("../bot/connections");
-const { loadCatalogFromApi } = require("../bot/bot_catalog_loader");
+import dotenv from "dotenv";
+dotenv.config();
+
+import pkg from "whatsapp-web.js";
+const { Client, LocalAuth, MessageMedia } = pkg;
+
+import qrcode from "qrcode-terminal";
+import qrcodeLib from "qrcode";
+import fs from "fs";
+import path from "path";
+import https from "https";
+import http from "http";
+import axios from "axios";
+import connections from "./connections.js";
+import { loadCatalogFromApi } from "./bot_catalog_loader.js";
+import { fileURLToPath } from "url";
+import api from "./api/client.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const COMMAND_GROUP = process.env.COMMAND_GROUP_ID || "120363405061423609@g.us";
-const http = require("http");
 const CONFIRMED_GROUP_ID =
   process.env.CONFIRMED_GROUP_ID || process.env.PEDIDOS_CONFIRMADOS_ID || null;
 const DUVIDAS_GROUP_ID = process.env.DUVIDAS_GROUP_ID || null;
 
 let CATALOG = { items: [], byName: new Map(), byCode: new Map(), source: null };
 
+
 (async function loadRemoteCatalogIfAvailable() {
   try {
-    const axios = require("axios");
-    const api = axios.create({
-      baseURL:
-        process.env.API_BASE_URL ||
-        `http://${process.env.API_HOST || "localhost"}:${
-          process.env.API_PORT || 8080
-        }`,
-      timeout: 10000,
-    });
     const remote = await loadCatalogFromApi(api, {
       suffixes: ["ens", "out", "prod"],
     });
@@ -67,53 +70,19 @@ function normalizeString(s) {
 }
 
 function postPedidoAPI(data) {
-  return new Promise((resolve, reject) => {
-    const payload = JSON.stringify(data);
-
-    // DEBUG: log do payload que será enviado para /pedido
-    try {
-      smallLog && smallLog("POST /pedido payload:", JSON.parse(payload));
-    } catch (e) {
-      // fallback
-      console.log("POST /pedido payload (raw):", payload);
-    }
-
-    const hostname = process.env.API_HOST || "localhost";
-    const port = process.env.API_PORT ? Number(process.env.API_PORT) : 8080;
-
-    const options = {
-      hostname,
-      port,
-      path: "/pedido",
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(payload),
-      },
-      timeout: 10000, // 10s
-    };
-
-    const reqApi = http.request(options, (res) => {
-      let body = "";
-      res.on("data", (chunk) => (body += chunk));
-      res.on("end", () => {
-        if (res.statusCode >= 200 && res.statusCode < 300) {
-          resolve({ status: res.statusCode, body });
-        } else {
-          reject(new Error(`API /pedido respondeu ${res.statusCode}: ${body}`));
-        }
-      });
+  return api
+    .post("/pedido", data)
+    .then((res) => ({ status: res.status, body: res.data }))
+    .catch((err) => {
+      if (err.response) {
+        throw new Error(
+          `API /pedido respondeu ${err.response.status}: ${JSON.stringify(
+            err.response.data
+          )}`
+        );
+      }
+      throw err;
     });
-
-    reqApi.on("error", (err) => reject(err));
-    reqApi.on("timeout", () => {
-      reqApi.destroy();
-      reject(new Error("Timeout ao conectar com API /pedido"));
-    });
-
-    reqApi.write(payload);
-    reqApi.end();
-  });
 }
 
 async function ensureClientExists({
@@ -125,44 +94,23 @@ async function ensureClientExists({
   email,
 }) {
   try {
-    const hostname = process.env.API_HOST || "localhost";
-    const port = process.env.API_PORT ? Number(process.env.API_PORT) : 8080;
-    const url = `http://${hostname}:${port}/cadastro`;
-
     const payload = {
       nome: nome || "Sem Nome",
       telefone: telefone || null,
       cep: cep || null,
       numero: numero || null,
       complemento: complemento || null,
-      // força explicitamente null quando não houver
       email: email && String(email).trim() !== "" ? String(email).trim() : null,
       senha: null,
     };
-
-    // Remove propriedades estritamente undefined para limpeza (mas deixa explicit null)
+    // remove undefined
     Object.keys(payload).forEach((k) => {
       if (payload[k] === undefined) delete payload[k];
     });
 
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      // se sua runtime não suporta 'timeout' em fetch, remova ou use AbortController
-    });
-
-    if (resp.ok) {
-      try {
-        const body = await resp.json().catch(() => ({}));
-        smallLog && smallLog("ensureClientExists:", resp.status, body);
-      } catch (_) {}
-      return true;
-    } else {
-      const text = await resp.text().catch(() => "");
-      smallLog && smallLog("Falha ensureClientExists:", resp.status, text);
-      return false;
-    }
+    const resp = await api.post("/cadastro", payload);
+    smallLog && smallLog("ensureClientExists:", resp.status, resp.data || "");
+    return true;
   } catch (err) {
     smallLog &&
       smallLog(
@@ -1238,7 +1186,7 @@ function createClient(puppeteerOptions) {
         }
         if (text === "2") {
           await msg.reply(
-            "📝 Para começar o orçamento, informe o *nome do cliente/loja*:"
+            "📝 Para começarmos o orçamento, informe o *nome do cliente/loja*:"
           );
           estado.etapa = "pedido_nome";
           estado.dados = {};
@@ -1260,7 +1208,7 @@ function createClient(puppeteerOptions) {
         }
         if (/pedido|comprar|quero/.test(text)) {
           await msg.reply(
-            "📝 Para começar o orçamento, informe o *nome do cliente/loja*:"
+            "📝 Para começarmos o orçamento, informe o *nome do cliente/loja*:"
           );
           estado.etapa = "pedido_nome";
           estado.dados = {};

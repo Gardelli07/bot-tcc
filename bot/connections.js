@@ -2,11 +2,11 @@
 // Utilitários para detectar Tor, checar porta SOCKS, localizar Chrome e montar opções do puppeteer.
 // Exporta funções para serem usadas pelo index.js
 
-const net = require('net');
-const child = require('child_process');
-const os = require('os');
-const fs = require('fs');
-const path = require('path');
+import net from 'net';
+import child from 'child_process';
+import os from 'os';
+import fs from 'fs';
+import path from 'path';
 
 function wait(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -130,7 +130,7 @@ async function getStartupOptions() {
   return { torExec, torPort, chromePath };
 }
 
-module.exports = {
+export default {
   checkTorProxy,
   findTorBrowser,
   ensureTorRunning,
