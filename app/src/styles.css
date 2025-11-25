@@ -145,7 +145,7 @@ body {
 .box {
   height: 350px;
   background: #e8e7e7; /* terminal real */
-  color: #0f0;
+  color: rgb(0, 0, 0);
   padding: 12px;
   overflow-y: auto;
   border-radius: 12px;
