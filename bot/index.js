@@ -1299,7 +1299,7 @@ function createClient(puppeteerOptions) {
         }
         if (text === "4") {
           await msg.reply(
-            '🌐 Nosso site: https://seudominio.com\n\nSe quiser voltar ao menu inicial, só digitar "menu".'
+            '🌐 Nosso site: https://www.rbscerais.com.br\n\nSe quiser voltar ao menu inicial, só digitar "menu".'
           );
           estado.etapa = "fim";
           return;
