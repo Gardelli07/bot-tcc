@@ -26,7 +26,6 @@ const DUVIDAS_GROUP_ID = process.env.DUVIDAS_GROUP_ID || null;
 
 let CATALOG = { items: [], byName: new Map(), byCode: new Map(), source: null };
 
-
 (async function loadRemoteCatalogIfAvailable() {
   try {
     const remote = await loadCatalogFromApi(api, {
@@ -70,17 +69,53 @@ function normalizeString(s) {
 }
 
 function postPedidoAPI(data) {
+  // log completo do que vamos enviar (formatado)
+  try {
+    smallLog(
+      "POST /pedido — payload (compact):",
+      Array.isArray(data) ? `${data.length} itens` : ""
+    );
+    console.log(
+      ">>> POST /pedido payload (full):\n",
+      JSON.stringify(data, null, 2)
+    );
+  } catch (e) {
+    console.log("Erro ao logar payload:", e);
+  }
+
   return api
     .post("/pedido", data)
-    .then((res) => ({ status: res.status, body: res.data }))
+    .then((res) => {
+      // log da resposta completa (útil para debug)
+      smallLog(`POST /pedido OK — status ${res.status}`);
+      try {
+        console.log(
+          "<<< POST /pedido response body:\n",
+          JSON.stringify(res.data, null, 2)
+        );
+      } catch (_) {}
+      return { status: res.status, body: res.data };
+    })
     .catch((err) => {
+      // log detalhado do erro antes de re-throw
       if (err.response) {
+        smallLog(
+          `API /pedido respondeu ${
+            err.response.status
+          } — body: ${JSON.stringify(err.response.data)}`
+        );
+        console.error(
+          "API /pedido erro (response):",
+          err.response.status,
+          err.response.data
+        );
         throw new Error(
           `API /pedido respondeu ${err.response.status}: ${JSON.stringify(
             err.response.data
           )}`
         );
       }
+      console.error("API /pedido erro (no response):", err);
       throw err;
     });
 }
@@ -660,7 +695,7 @@ function createClient(puppeteerOptions) {
         return;
       }
 
-      // === Bloco vendedor ===
+      // === Bloco vendedor (com logs de debug) ===
 
       if (
         textRaw &&
@@ -783,7 +818,7 @@ function createClient(puppeteerOptions) {
               cepInfo && cepInfo.logradouro ? cepInfo.logradouro : null,
             cidade: cepInfo && cepInfo.localidade ? cepInfo.localidade : null,
             nome: clienteNome || null,
-            produto: it.name,
+            produto: normalizeString(it.name.replace(/^\d+\s*x\s*/i, "")),
             metodo_pagamento:
               pagamento && pagamento.trim() !== "" ? pagamento.trim() : null,
             preco: it.price != null ? Number(it.price) : 0,
@@ -859,39 +894,102 @@ function createClient(puppeteerOptions) {
               }
               // --- fim garantia cliente ---
 
-              const resp = await postPedidoAPI(payload);
-              smallLog("POST /pedido OK (importado):", resp.status);
-              if (CONFIRMED_GROUP_ID) {
-                try {
-                  await client.sendMessage(
-                    CONFIRMED_GROUP_ID,
-                    `✅ ${payload.length} pedido(s) gravado(s) no banco (importado).`
-                  );
-                } catch (e) {}
-              }
-              await client.sendMessage(
-                msg.from,
-                `Orçamento importado com sucesso — ${payload.length} pedido(s) enviados.`
-              );
-            }
-          } catch (errApi) {
-            smallLog(
-              "Erro ao enviar pedidos importados para API:",
-              errApi && errApi.message ? errApi.message : errApi
-            );
-            if (CONFIRMED_GROUP_ID) {
+              // =======================
+              // LOGS DETALHADOS ANTES DO POST
+              // =======================
               try {
-                await client.sendMessage(
-                  CONFIRMED_GROUP_ID,
-                  `⚠️ Falha ao gravar pedido(s) importado(s): ${String(
-                    errApi && errApi.message ? errApi.message : errApi
-                  )}`
+                smallLog(
+                  `Preparando envio de ${payload.length} pedido(s) para /pedido (importado)`
                 );
-              } catch (e) {}
+                console.log(
+                  "===> Payload /pedido (full):\n",
+                  JSON.stringify(payload, null, 2)
+                );
+
+                payload.forEach((p, idx) => {
+                  smallLog(
+                    `Pedido[${idx}] produto="${p.produto}" quantidade=${
+                      p.quantidade
+                    } preco=${p.preco} cep=${p.cep || "null"}`
+                  );
+                  console.log(`Pedido[${idx}] raw:`, p);
+                });
+              } catch (e) {
+                console.error("Erro ao logar payload antes do envio:", e);
+              }
+
+              // =======================
+              // CHAMADA À API COM LOGS DE RESPOSTA/ERRO
+              // =======================
+              try {
+                const resp = await postPedidoAPI(payload);
+                smallLog("POST /pedido OK (importado):", resp.status);
+                try {
+                  console.log(
+                    "POST /pedido response.body:\n",
+                    JSON.stringify(resp.body, null, 2)
+                  );
+                } catch (_) {}
+
+                if (CONFIRMED_GROUP_ID) {
+                  try {
+                    await client.sendMessage(
+                      CONFIRMED_GROUP_ID,
+                      `✅ ${payload.length} pedido(s) gravado(s) no banco (importado).`
+                    );
+                  } catch (e) {}
+                }
+                await client.sendMessage(
+                  msg.from,
+                  `Orçamento importado com sucesso — ${payload.length} pedido(s) enviados.`
+                );
+              } catch (errApi) {
+                // log detalhado do erro para facilitar debug (produto não encontrado, etc)
+                smallLog(
+                  "Erro ao enviar pedidos importados para API:",
+                  errApi && errApi.message ? errApi.message : errApi
+                );
+                try {
+                  // se for erro Axios contendo response, logue status + body
+                  if (errApi && errApi.response) {
+                    console.error(
+                      "API /pedido erro (response):",
+                      errApi.response.status,
+                      errApi.response.data
+                    );
+                  } else {
+                    console.error("API /pedido erro (no response):", errApi);
+                  }
+                } catch (e) {
+                  console.error("Erro ao logar errApi:", e);
+                }
+
+                if (CONFIRMED_GROUP_ID) {
+                  try {
+                    await client.sendMessage(
+                      CONFIRMED_GROUP_ID,
+                      `⚠️ Falha ao gravar pedido(s) importado(s): ${String(
+                        errApi && errApi.message ? errApi.message : errApi
+                      )}`
+                    );
+                  } catch (e) {}
+                }
+
+                // mensagem amigável pro vendedor
+                await client.sendMessage(
+                  msg.from,
+                  "Erro ao gravar pedidos importados. Verifique o log."
+                );
+              }
             }
+          } catch (errInner) {
+            smallLog(
+              "Erro no fluxo de envio (vendedor):",
+              errInner && errInner.message ? errInner.message : errInner
+            );
             await client.sendMessage(
               msg.from,
-              "Erro ao gravar pedidos importados. Verifique o log."
+              "Erro ao processar orçamento para envio. Veja logs."
             );
           }
         } catch (err) {
